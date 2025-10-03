@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: redis-wrapper-dev
+    volumes:
+      - .:/workspace:cached
+      - go-mod-cache:/go/pkg/mod
+    working_dir: /workspace
+    ports:
+      - "2345:2345"  # For Delve debugger
+    environment:
+      - CGO_ENABLED=1
+      - GO111MODULE=on
+    command: sleep infinity
+    networks:
+      - redis-wrapper-dev
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis-wrapper-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - redis-wrapper-dev
+    command: redis-server --appendonly yes
+
+volumes:
+  go-mod-cache:
+
+networks:
+  redis-wrapper-dev:
+    driver: bridge

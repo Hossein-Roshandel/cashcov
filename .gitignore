@@ -1,0 +1,77 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Go coverage files
+coverage.out
+coverage.html
+*.cover
+
+# Go profiling files
+*.prof
+*.pprof
+
+# Dependency directories (uncomment if using vendoring)
+# vendor/
+
+# Go workspace file
+go.work
+
+# IDE and editor files
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker
+.dockerignore
+
+# OS generated files
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Log files
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+dist/
+build/
+
+# Benchmark results
+bench.out
+
+# Go module proxy cache
+/pkg/
+
+# Air live reloading tool
+tmp/
+
+# Pre-commit cache
+.pre-commit-config.yaml.cache
