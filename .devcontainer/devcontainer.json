@@ -18,7 +18,9 @@
                 "ms-vscode.makefile-tools",
                 "ms-vscode.test-adapter-converter",
                 "redhat.vscode-yaml",
-                "ms-vscode.vscode-docker"
+                "ms-vscode.vscode-docker",
+                "mhutchie.git-graph",
+                "eamodio.gitlens"
             ],
             "settings": {
                 "go.toolsManagement.checkForUpdates": "local",
