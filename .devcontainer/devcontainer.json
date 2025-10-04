@@ -47,8 +47,12 @@
     "forwardPorts": [6379, 2345],
 
     // Use 'postCreateCommand' to run commands after the container is created.
-    "postCreateCommand": "go mod download",
+    "postStartCommand": "/workspace/setup-dev.sh",
 
     // Comment out to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
-    "remoteUser": "vscode"
+    "remoteUser": "vscode",
+    "mounts": [
+        "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,consistency=cached"
+      ]
 }

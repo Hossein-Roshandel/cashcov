@@ -1,3 +1,7 @@
+# Define variables for reuse
+GOPATH := $(shell go env GOPATH)
+GOBIN := $(GOPATH)/bin
+
 .PHONY: help build test test-race test-cover lint lint-fix fmt vet clean deps tidy security-check benchmark profile help
 
 # Default target
@@ -70,13 +74,14 @@ profile: ## Run CPU profiling
 
 # Development setup
 dev-setup: ## Set up development environment
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-	go install golang.org/x/tools/cmd/goimports@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
 	go install github.com/securego/gosec/v2/cmd/gosec@latest
+	go install golang.org/x/tools/cmd/goimports@latest
 	go install golang.org/x/tools/gopls@latest
-	@echo "Development tools installed. You may also want to install pre-commit:"
-	@echo "pip install pre-commit"
-	@echo "pre-commit install"
+
+dev-pre-commit:
+	pre-commit install
+
 
 # CI simulation
 ci: ## Run all CI checks locally

@@ -1,3 +1,4 @@
+version: "2"
 run:
   timeout: 5m
   issues-exit-code: 1
@@ -6,12 +7,7 @@ run:
   modules-download-mode: readonly
   go: "1.21"
 
-output:
-  format: colored-line-number
-  print-issued-lines: true
-  print-linter-name: true
-
-linters-settings:
+settings:
   errcheck:
     check-type-assertions: true
     check-blank: true
@@ -122,35 +118,30 @@ linters:
     - wrapcheck
     - wsl
 
+exclusions:
+  - path: _test\.go
+    linters:
+      - errcheck
+      - gocritic
+      - gosec
+      - unparam
+  - path: cmd/
+    linters:
+      - gocritic
+      - gosec
+  - linters:
+      - lll
+    source: "^//go:generate "
+  - linters:
+      - gocritic
+    text: "string `.*` has \\d+ occurrences, make it a constant"
+  - linters:
+      - stylecheck
+    text: "ST1003:"
+  - linters:
+      - revive
+    text: "exported: exported method .*\\..* should have comment or be unexported"
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gocritic
-        - gosec
-        - unparam
-    - path: cmd/
-      linters:
-        - gocritic
-        - gosec
-    - linters:
-        - lll
-      source: "^//go:generate "
-    - linters:
-        - gocritic
-      text: "string `.*` has \\d+ occurrences, make it a constant"
-    - linters:
-        - stylecheck
-      text: "ST1003:"
-    - linters:
-        - revive
-      text: "exported: exported method .*\\..* should have comment or be unexported"
-  exclude-use-default: false
-  exclude:
-    # Exclude some gosec messages
-    - "G404: Use of weak random number generator"
-    - "G601: Implicit memory aliasing in for loop"
   max-issues-per-linter: 0
   max-same-issues: 0
   new: false

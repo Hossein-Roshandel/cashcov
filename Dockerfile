@@ -1,8 +1,7 @@
-# Development Dockerfile for Redis Wrapper
-FROM golang:1.25.1-bookworm
+# Base stage with system dependencies
+FROM golang:1.25.1-bookworm AS base
 
-
-# Install system dependencies
+# Install system dependencies in one layer to reduce image size
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -10,34 +9,54 @@ RUN apt-get update && apt-get install -y \
     make \
     build-essential \
     ca-certificates \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
-
-# Install Python and pip for pre-commit
-RUN apt-get update && apt-get install -y python3-pip && rm -rf /var/lib/apt/lists/*
 
 # Create vscode user for dev container
 RUN groupadd --gid 1000 vscode \
     && useradd --uid 1000 --gid vscode --shell /bin/bash --create-home vscode \
-    && apt-get update \
-    && apt-get install -y sudo \
-    && echo vscode ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/vscode \
-    && chmod 0440 /etc/sudoers.d/vscode \
-    && rm -rf /var/lib/apt/lists/*
+    && echo 'vscode ALL=(root) NOPASSWD:ALL' > /etc/sudoers.d/vscode \
+    && chmod 0440 /etc/sudoers.d/vscode
 
+# Builder stage for installing Go tools and dependencies
+FROM base AS builder
+
+# Set Go environment variables
+ENV GO111MODULE=on
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOPATH=/home/vscode/go
+ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
+
+# Switch to vscode user
 USER vscode
-
-# Set up workspace
 WORKDIR /workspace
 
-# Copy go mod files first for better caching
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy source code
-COPY . .
-
-# Install development tools using Makefile
+# Copy project files
+COPY Makefile go.mod go.sum ./
 RUN make dev-setup
 
-# Default command
+
+FROM base AS final
+
+# Set Go environment variables
+ENV GO111MODULE=on
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOPATH=/home/vscode/go
+ENV PATH=$GOPATH/bin:/usr/local/go/bin:/home/vscode/.local/bin:$PATH
+
+# Copy Go tools and module cache from builder
+COPY --from=builder --chown=vscode:vscode /home/vscode /home/vscode
+COPY --from=builder  /usr/local/go /usr/local/go
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+
+# Switch to vscode user
+USER vscode
+WORKDIR /workspace
+
+RUN uv tool install pre-commit --with pre-commit-uv
+
+# Default command for dev container
 CMD ["bash"]
