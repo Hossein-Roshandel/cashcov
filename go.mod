@@ -8,6 +8,7 @@ require (
 require (
 	github.com/go-redis/redismock/v9 v9.2.0
 	github.com/redis/go-redis/v9 v9.14.0
+	github.com/joho/godotenv v1.5.1
 )
 
 module cache

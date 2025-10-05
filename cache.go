@@ -14,33 +14,26 @@ import (
 // Handler is the Redis cache handler.
 type Handler[T any] struct {
 	config           handlerConfig
-	localLocks       *keyedMutex
+	localLocks       *KeyedMutex
 	lastRefreshByKey map[string]time.Time
 	lastRefreshMu    sync.Mutex
 }
 
 // New creates a new cache Handler[T].
-func New[T any](rdb *redis.Client, opts ...Option) *Handler[T] {
-	config := handlerConfig{
-		rdb:                         rdb,
-		prefix:                      "",
-		defaultTTL:                  5 * time.Minute,
-		bgRefreshTimeout:            5 * time.Second,
-		refreshCooldown:             0,
-		defaultMissPolicy:           MissPolicySyncWriteThenReturn,
-		staleDataTTL:                24 * time.Hour, // Keep stale data for 24 hours for SWR
-		defaultRefreshAheadThreshold: 0.2,           // Refresh when 20% TTL remaining
-		defaultProbabilisticBeta:    1.0,            // Standard probabilistic refresh
-		cooperativeTimeout:          10 * time.Second, // Max wait for cooperative refresh
+func New[T any](rdb *redis.Client, opts ...Option) (*Handler[T], error) {
+	config, err := loadHandlerConfig(rdb)
+	if err != nil {
+		return nil, err
 	}
+
 	for _, o := range opts {
-		o(&config)
+		o(config)
 	}
 	return &Handler[T]{
-		config:           config,
-		localLocks:       newKeyedMutex(),
+		config:           *config,
+		localLocks:       NewKeyedMutex(),
 		lastRefreshByKey: make(map[string]time.Time),
-	}
+	}, nil
 }
 
 func WithPrefix(prefix string) Option {
@@ -74,18 +67,18 @@ func WithStaleDataTTL(ttl time.Duration) Option {
 // WithRefreshAheadThreshold sets the default threshold for refresh-ahead policy.
 // Value should be between 0.0 and 1.0 (e.g., 0.2 = refresh when 20% TTL remaining).
 func WithRefreshAheadThreshold(threshold float64) Option {
-	return func(c *handlerConfig) { 
+	return func(c *handlerConfig) {
 		if threshold >= 0.0 && threshold <= 1.0 {
-			c.defaultRefreshAheadThreshold = threshold 
+			c.defaultRefreshAheadThreshold = threshold
 		}
 	}
 }
 
 // WithProbabilisticBeta sets the beta parameter for probabilistic refresh policy.
 func WithProbabilisticBeta(beta float64) Option {
-	return func(c *handlerConfig) { 
+	return func(c *handlerConfig) {
 		if beta > 0 {
-			c.defaultProbabilisticBeta = beta 
+			c.defaultProbabilisticBeta = beta
 		}
 	}
 }
@@ -105,24 +98,6 @@ func WithoutBackgroundRefresh() CallOption {
 
 func WithCallMissPolicy(p MissPolicy) CallOption {
 	return func(c *callOpts) { c.overrideMissPolicy = &p }
-}
-
-// WithRefreshAheadThreshold sets the refresh-ahead threshold for this call.
-func WithRefreshAheadThreshold(threshold float64) CallOption {
-	return func(c *callOpts) { 
-		if threshold >= 0.0 && threshold <= 1.0 {
-			c.refreshAheadThreshold = threshold 
-		}
-	}
-}
-
-// WithProbabilisticBeta sets the probabilistic refresh beta for this call.
-func WithProbabilisticBeta(beta float64) CallOption {
-	return func(c *callOpts) { 
-		if beta > 0 {
-			c.probabilisticRefreshBeta = beta 
-		}
-	}
 }
 
 // WithStaleCheckTimeout sets timeout for checking stale data.
@@ -153,12 +128,15 @@ func (h *Handler[T]) Set(ctx context.Context, key string, value T, opts ...CallO
 		ttl = h.config.defaultTTL
 	}
 
+	var err error
+	var b []byte
+
 	k := h.fullKey(key)
-	b, err := json.Marshal(value)
+	b, err = json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	if err := h.config.rdb.Set(ctx, k, b, ttl).Err(); err != nil {
+	if err = h.config.rdb.Set(ctx, k, b, ttl).Err(); err != nil {
 		return fmt.Errorf("redis set: %w", err)
 	}
 	h.setLastRefreshNow(k) // For cooldown accounting
@@ -176,13 +154,15 @@ func (h *Handler[T]) Get(ctx context.Context, key string) (Result[T], error) {
 		}
 		return Result[T]{Value: zero}, fmt.Errorf("redis get: %w", err)
 	}
+	var err error
+	var raw []byte
 
-	raw, err := cmd.Bytes()
+	raw, err = cmd.Bytes()
 	if err != nil {
 		return Result[T]{Value: zero}, fmt.Errorf("bytes: %w", err)
 	}
 	var v T
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err = json.Unmarshal(raw, &v); err != nil {
 		return Result[T]{Value: zero}, fmt.Errorf("unmarshal: %w", err)
 	}
 
@@ -193,7 +173,12 @@ func (h *Handler[T]) Get(ctx context.Context, key string) (Result[T], error) {
 // Main Entry: GetOrRefresh
 // ---------------------------
 
-func (h *Handler[T]) GetOrRefresh(ctx context.Context, key string, gen Generator[T], opts ...CallOption) (Result[T], error) {
+func (h *Handler[T]) GetOrRefresh(
+	ctx context.Context,
+	key string,
+	gen Generator[T],
+	opts ...CallOption,
+) (Result[T], error) {
 	var co callOpts
 	for _, o := range opts {
 		o(&co)
@@ -207,8 +192,11 @@ func (h *Handler[T]) GetOrRefresh(ctx context.Context, key string, gen Generator
 		missPolicy = *co.overrideMissPolicy
 	}
 
+	var res Result[T]
+	var err error
+
 	// 1) Try cache
-	if res, err := h.Get(ctx, key); err == nil {
+	if res, err = h.Get(ctx, key); err == nil {
 		// Handle hit-based refresh policies
 		if !co.disableHitRefresh {
 			h.handleHitRefresh(ctx, key, ttl, gen, missPolicy, co)

@@ -78,6 +78,7 @@ dev-setup: ## Set up development environment
 	go install github.com/securego/gosec/v2/cmd/gosec@latest
 	go install golang.org/x/tools/cmd/goimports@latest
 	go install golang.org/x/tools/gopls@latest
+	go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
 
 dev-pre-commit:
 	pre-commit install

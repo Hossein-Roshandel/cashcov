@@ -1,6 +1,7 @@
-package cache
+package cache_test //nolint:cyclop // TODO: fix later the average complexity for the package cache_test is 19.000000, max is 10.000000
 
 import (
+	"cache"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,12 @@ import (
 )
 
 // TestHandler tests the core functionality of the Handler[T] type.
+//
+//nolint:gocognit,gocyclo,cyclop  // TODO: fix later cognitive complexity 62 of func `TestHandler` is high (> 20) // TODO: cyclomatic complexity 32 of func `TestHandler` is high (> 30) calculated cyclomatic complexity for function TestHandler is 32, max is 30
 func TestHandler(t *testing.T) {
+	var err error
+	var result cache.Result[string]
+
 	// Create a mock Redis client
 	rdb, mock := redismock.NewClientMock()
 
@@ -25,9 +31,9 @@ func TestHandler(t *testing.T) {
 		mock.ClearExpect()
 
 		// Create a Handler for string type
-		h := New[string](rdb,
-			WithPrefix("test"),
-			WithDefaultTTL(1*time.Minute),
+		h, _ := cache.New[string](rdb,
+			cache.WithPrefix("test"),
+			cache.WithDefaultTTL(1*time.Minute),
 		)
 
 		// Set up mock expectations
@@ -37,11 +43,11 @@ func TestHandler(t *testing.T) {
 		// Test successful Set and Get
 		key := "key1"
 		value := "test-value"
-		if err := h.Set(ctx, key, value); err != nil {
+		if err = h.Set(ctx, key, value); err != nil {
 			t.Fatalf("Set failed: %v", err)
 		}
 
-		result, err := h.Get(ctx, key)
+		result, err = h.Get(ctx, key)
 		if err != nil {
 			t.Fatalf("Get failed: %v", err)
 		}
@@ -56,7 +62,7 @@ func TestHandler(t *testing.T) {
 		}
 
 		// Verify all expectations were met
-		if err := mock.ExpectationsWereMet(); err != nil {
+		if err = mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("Redis mock expectations not met: %v", err)
 		}
 	})
@@ -66,9 +72,9 @@ func TestHandler(t *testing.T) {
 		mock.ClearExpect()
 
 		// Create a Handler for string type
-		h := New[string](rdb,
-			WithPrefix("test"),
-			WithDefaultTTL(1*time.Minute),
+		h, _ := cache.New[string](rdb,
+			cache.WithPrefix("test"),
+			cache.WithDefaultTTL(1*time.Minute),
 		)
 
 		// Set up mock expectations
@@ -76,7 +82,7 @@ func TestHandler(t *testing.T) {
 
 		// Test cache miss
 		key := "missing-key"
-		result, err := h.Get(ctx, key)
+		result, err = h.Get(ctx, key)
 		if !errors.Is(err, redis.Nil) {
 			t.Errorf("Expected redis.Nil error, got %v", err)
 		}
@@ -88,7 +94,7 @@ func TestHandler(t *testing.T) {
 		}
 
 		// Verify all expectations were met
-		if err := mock.ExpectationsWereMet(); err != nil {
+		if err = mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("Redis mock expectations not met: %v", err)
 		}
 	})
@@ -101,8 +107,8 @@ func TestHandler(t *testing.T) {
 		type badType struct {
 			Ch chan int // JSON marshaling fails for channels
 		}
-		hBad := New[badType](rdb)
-		err := hBad.Set(ctx, "bad-key", badType{Ch: make(chan int)})
+		hBad, _ := cache.New[badType](rdb)
+		err = hBad.Set(ctx, "bad-key", badType{Ch: make(chan int)})
 		if err == nil {
 			t.Error("Expected JSON marshal error, got nil")
 		}
@@ -118,9 +124,9 @@ func TestHandler(t *testing.T) {
 		mock.ClearExpect()
 
 		// Create a Handler for string type
-		h := New[string](rdb,
-			WithPrefix("test"),
-			WithDefaultTTL(1*time.Minute),
+		h, _ := cache.New[string](rdb,
+			cache.WithPrefix("test"),
+			cache.WithDefaultTTL(1*time.Minute),
 		)
 
 		// Set up mock expectations
@@ -128,7 +134,7 @@ func TestHandler(t *testing.T) {
 
 		// Test Get with invalid JSON data
 		key := "invalid-json"
-		result, err := h.Get(ctx, key)
+		result, err = h.Get(ctx, key)
 		if err == nil {
 			t.Error("Expected JSON unmarshal error, got nil")
 		}
@@ -137,7 +143,7 @@ func TestHandler(t *testing.T) {
 		}
 
 		// Verify all expectations were met
-		if err := mock.ExpectationsWereMet(); err != nil {
+		if err = mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("Redis mock expectations not met: %v", err)
 		}
 	})
@@ -153,7 +159,7 @@ func TestHandler(t *testing.T) {
 	// 		return expectedValue, nil
 	// 	}
 
-	// 	result, err := h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicySyncWriteThenReturn))
+	// 	result, err = h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicySyncWriteThenReturn))
 	// 	if err != nil {
 	// 		t.Fatalf("GetOrRefresh failed: %v", err)
 	// 	}
@@ -168,7 +174,7 @@ func TestHandler(t *testing.T) {
 	// 	}
 
 	// 	// Verify value was cached
-	// 	cachedResult, err := h.Get(ctx, key)
+	// 	cachedResult, err = h.Get(ctx, key)
 	// 	if err != nil {
 	// 		t.Fatalf("Get failed: %v", err)
 	// 	}
@@ -191,7 +197,7 @@ func TestHandler(t *testing.T) {
 	// 		return expectedValue, nil
 	// 	}
 
-	// 	result, err := h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicyReturnThenAsyncWrite))
+	// 	result, err = h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicyReturnThenAsyncWrite))
 	// 	if err != nil {
 	// 		t.Fatalf("GetOrRefresh failed: %v", err)
 	// 	}
@@ -207,7 +213,7 @@ func TestHandler(t *testing.T) {
 
 	// 	// Wait for background write (async)
 	// 	time.Sleep(100 * time.Millisecond) // Give background goroutine time to execute
-	// 	cachedResult, err := h.Get(ctx, key)
+	// 	cachedResult, err = h.Get(ctx, key)
 	// 	if err != nil {
 	// 		t.Fatalf("Get failed: %v", err)
 	// 	}
@@ -224,9 +230,9 @@ func TestHandler(t *testing.T) {
 		mock.ClearExpect()
 
 		// Create a Handler for string type
-		h := New[string](rdb,
-			WithPrefix("test"),
-			WithDefaultTTL(1*time.Minute),
+		h, _ := cache.New[string](rdb,
+			cache.WithPrefix("test"),
+			cache.WithDefaultTTL(1*time.Minute),
 		)
 
 		// Set up mock expectations
@@ -235,17 +241,17 @@ func TestHandler(t *testing.T) {
 
 		key := "hit-key"
 		value := "cached-value"
-		if err := h.Set(ctx, key, value); err != nil {
+		if err = h.Set(ctx, key, value); err != nil {
 			t.Fatalf("Set failed: %v", err)
 		}
 
 		generateCount := 0
-		gen := func(ctx context.Context) (string, error) {
+		gen := func(_ context.Context) (string, error) {
 			generateCount++
 			return "should-not-be-called", nil
 		}
 
-		result, err := h.GetOrRefresh(ctx, key, gen)
+		result, err = h.GetOrRefresh(ctx, key, gen)
 		if err != nil {
 			t.Fatalf("GetOrRefresh failed: %v", err)
 		}
@@ -260,7 +266,7 @@ func TestHandler(t *testing.T) {
 		}
 
 		// Verify all expectations were met
-		if err := mock.ExpectationsWereMet(); err != nil {
+		if err = mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("Redis mock expectations not met: %v", err)
 		}
 	})
@@ -270,10 +276,10 @@ func TestHandler(t *testing.T) {
 		mock.ClearExpect()
 
 		// Create a Handler for string type
-		h := New[string](rdb,
-			WithPrefix("test"),
-			WithDefaultTTL(1*time.Minute),
-			WithBackgroundRefreshTimeout(2*time.Second),
+		h, _ := cache.New[string](rdb,
+			cache.WithPrefix("test"),
+			cache.WithDefaultTTL(1*time.Minute),
+			cache.WithBackgroundRefreshTimeout(2*time.Second),
 		)
 
 		// Set up mock expectations
@@ -284,18 +290,18 @@ func TestHandler(t *testing.T) {
 		initialValue := "initial-value"
 		generateCount := 0
 
-		gen := func(ctx context.Context) (string, error) {
+		gen := func(_ context.Context) (string, error) {
 			generateCount++
 			return "updated-value", nil
 		}
 
 		// Populate cache
-		if err := h.Set(ctx, key, initialValue); err != nil {
+		if err = h.Set(ctx, key, initialValue); err != nil {
 			t.Fatalf("Set failed: %v", err)
 		}
 
 		// Trigger GetOrRefresh with background refresh
-		result, err := h.GetOrRefresh(ctx, key, gen)
+		result, err = h.GetOrRefresh(ctx, key, gen)
 		if err != nil {
 			t.Fatalf("GetOrRefresh failed: %v", err)
 		}
@@ -313,7 +319,7 @@ func TestHandler(t *testing.T) {
 		}
 
 		// Verify all expectations were met
-		if err := mock.ExpectationsWereMet(); err != nil {
+		if err = mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("Redis mock expectations not met: %v", err)
 		}
 	})
@@ -323,8 +329,8 @@ func TestHandler(t *testing.T) {
 		mock.ClearExpect()
 
 		// Create a Handler for string type
-		h := New[string](rdb,
-			WithRefreshCooldown(500*time.Millisecond),
+		h, _ := cache.New[string](rdb,
+			cache.WithRefreshCooldown(500*time.Millisecond),
 		)
 
 		// Set up mock expectations
@@ -334,18 +340,18 @@ func TestHandler(t *testing.T) {
 		key := "cooldown-key"
 		generateCount := 0
 
-		gen := func(ctx context.Context) (string, error) {
+		gen := func(_ context.Context) (string, error) {
 			generateCount++
 			return fmt.Sprintf("value-%d", generateCount), nil
 		}
 
 		// Populate cache
-		if err := h.Set(ctx, key, "initial"); err != nil {
+		if err = h.Set(ctx, key, "initial"); err != nil {
 			t.Fatalf("Set failed: %v", err)
 		}
 
 		// First GetOrRefresh
-		_, err := h.GetOrRefresh(ctx, key, gen)
+		_, err = h.GetOrRefresh(ctx, key, gen)
 		if err != nil {
 			t.Fatalf("GetOrRefresh failed: %v", err)
 		}
@@ -356,7 +362,7 @@ func TestHandler(t *testing.T) {
 		}
 
 		// Verify all expectations were met
-		if err := mock.ExpectationsWereMet(); err != nil {
+		if err = mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("Redis mock expectations not met: %v", err)
 		}
 	})
@@ -383,7 +389,7 @@ func TestHandler(t *testing.T) {
 	// 	for i := 0; i < concurrentCalls; i++ {
 	// 		go func() {
 	// 			defer wg.Done()
-	// 			_, err := h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicySyncWriteThenReturn))
+	// 			_, err = h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicySyncWriteThenReturn))
 	// 			if err != nil {
 	// 				t.Errorf("GetOrRefresh failed: %v", err)
 	// 			}
@@ -396,7 +402,7 @@ func TestHandler(t *testing.T) {
 	// 	}
 
 	// 	// Verify value was cached
-	// 	result, err := h.Get(ctx, key)
+	// 	result, err = h.Get(ctx, key)
 	// 	if err != nil {
 	// 		t.Fatalf("Get failed: %v", err)
 	// 	}
@@ -411,7 +417,7 @@ func TestHandler(t *testing.T) {
 
 // TestKeyedMutex tests the thread safety of the keyedMutex.
 func TestKeyedMutex(t *testing.T) {
-	km := newKeyedMutex()
+	km := cache.NewKeyedMutex()
 	key := "test-key"
 	var wg sync.WaitGroup
 	const concurrentLocks = 5
@@ -420,7 +426,7 @@ func TestKeyedMutex(t *testing.T) {
 
 	// Test concurrent Lock
 	wg.Add(concurrentLocks)
-	for i := 0; i < concurrentLocks; i++ {
+	for range concurrentLocks {
 		go func() {
 			defer wg.Done()
 			unlock := km.Lock(key)
