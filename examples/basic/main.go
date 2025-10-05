@@ -14,8 +14,8 @@ import (
 
 // Configuration constants for the cache.
 const (
-	TTLminutes             = 1 // Cache TTL set to 1 minute
-	RefreshCoolDownSeconds = 6 // Cooldown period for refresh in seconds
+	TTLminutes             = 1  // Cache TTL set to 1 minute
+	RefreshCoolDownSeconds = 10 // Cooldown period for refresh in seconds
 )
 
 // dataSource simulates an external data source (e.g., database or API) that provides fresh data.
