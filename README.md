@@ -97,27 +97,27 @@ The cache system consists of several key components working together:
 ├─────────────────────────────────────────────────────────┤
 │ Fields:                                                 │
 │  • config: handlerConfig                                │
-│  • localLocks: keyedMutex                              │
-│  • lastRefreshByKey: map[string]time.Time              │
-│  • lastRefreshMu: sync.Mutex                           │
+│  • localLocks: keyedMutex                               │
+│  • lastRefreshByKey: map[string]time.Time               │
+│  • lastRefreshMu: sync.Mutex                            │
 ├─────────────────────────────────────────────────────────┤
 │ Methods:                                                │
-│  • New(rdb, opts) Handler<T>                           │
-│  • Get(ctx, key) Result<T>                             │
-│  • Set(ctx, key, value, opts) error                    │
-│  • GetOrRefresh(ctx, key, gen, opts) Result<T>         │
+│  • New(rdb, opts) Handler<T>                            │
+│  • Get(ctx, key) Result<T>                              │
+│  • Set(ctx, key, value, opts) error                     │
+│  • GetOrRefresh(ctx, key, gen, opts) Result<T>          │
 └─────────────────────────────────────────────────────────┘
                               │
                               ├─── produces ───┐
                               │                │
                               ▼                ▼
-        ┌─────────────────────────────┐  ┌─────────────────────┐
-        │        Result<T>            │  │    Generator<T>     │
-        ├─────────────────────────────┤  ├─────────────────────┤
-        │ • Value: T                  │  │ Function Type:      │
+        ┌─────────────────────────────┐  ┌──────────────────────┐
+        │        Result<T>            │  │    Generator<T>      │
+        ├─────────────────────────────┤  ├──────────────────────┤
+        │ • Value: T                  │  │ Function Type:       │
         │ • FromCache: bool           │  │ func(context.Context)│
-        │ • CachedAt: time.Time       │  │    (T, error)       │
-        └─────────────────────────────┘  └─────────────────────┘
+        │ • CachedAt: time.Time       │  │    (T, error)        │
+        └─────────────────────────────┘  └──────────────────────┘
 ```
 
 #### 2. **Configuration System**
@@ -126,7 +126,7 @@ The cache system consists of several key components working together:
 Configuration Levels:
 
 ┌─────────────────────┐         ┌─────────────────────┐
-│   Option Functions  │────────▶│   handlerConfig     │
+│   Option Functions  │────────▶│   handlerConfig    │
 └─────────────────────┘         │ (Handler Level)     │
                                 ├─────────────────────┤
                                 │ • rdb: *redis.Client│
@@ -168,7 +168,7 @@ Client ──GetOrRefresh(key,gen)──▶ Handler ──Get(key)──▶ Redi
    │                                 ├─TryLock(key)      │
    │                                 ├─Generate(fresh)   │
    │                                 └─Set(key,data)─────┘
-   │                                                    
+   │
    └──Result{value, fromCache: true}──────────────────┘
 ```
 
@@ -177,27 +177,27 @@ Client ──GetOrRefresh(key,gen)──▶ Handler ──Get(key)──▶ Redi
 Client ──GetOrRefresh(key,gen)──▶ Handler ──Get(key)──▶ Redis
    ▲                                 │                    │
    │                                 ▼                    ▼
-   │                            Key not found         Key not found  
-   │                                 │                    
-   │                                 ▼                    
-   │                           Lock(key)                 
-   │                                 │                    
-   │                                 ▼                    
+   │                            Key not found         Key not found
+   │                                 │
+   │                                 ▼
+   │                           Lock(key)
+   │                                 │
+   │                                 ▼
    │                         Get(key) [double-check] ────▶ Redis
    │                                 │                    │
    │                                 ▼                    ▼
    │                          Still not found      Still not found
-   │                                 │                    
-   │                                 ▼                    
+   │                                 │
+   │                                 ▼
    │                          Generate(data) ◄──── Generator
-   │                                 │                    
-   │                                 ▼                    
+   │                                 │
+   │                                 ▼
    │                          Set(key,data) ─────▶ Redis
-   │                                 │                    
-   │                                 ▼                    
-   │                           Unlock(key)               
-   │                                 │                    
-   └──Result{value, fromCache: false}─┘                   
+   │                                 │
+   │                                 ▼
+   │                           Unlock(key)
+   │                                 │
+   └──Result{value, fromCache: false}─┘
 ```
 
 ## 🔄 Cache Miss Policies
@@ -354,7 +354,7 @@ Channel available?
 Per-Key Channel Map:
 ┌─────────────────────────────────────┐
 │ Key 'user:1'     → chan struct{}    │
-│ Key 'user:2'     → chan struct{}    │  
+│ Key 'user:2'     → chan struct{}    │
 │ Key 'product:123'→ chan struct{}    │
 │ ...                                 │
 └─────────────────────────────────────┘
@@ -584,7 +584,7 @@ import (
     "context"
     "fmt"
     "time"
-    
+
     "github.com/redis/go-redis/v9"
     "your-module/cache"
 )
@@ -594,27 +594,27 @@ func main() {
     rdb := redis.NewClient(&redis.Options{
         Addr: "localhost:6379",
     })
-    
+
     // Create a type-safe cache handler for strings
     handler := cache.New[string](rdb,
         cache.WithPrefix("myapp"),
         cache.WithDefaultTTL(5*time.Minute),
         cache.WithRefreshCooldown(30*time.Second),
     )
-    
+
     ctx := context.Background()
-    
+
     // Basic Set/Get operations
     err := handler.Set(ctx, "user:123", "john_doe")
     if err != nil {
         panic(err)
     }
-    
+
     result, err := handler.Get(ctx, "user:123")
     if err != nil {
         panic(err)
     }
-    
+
     fmt.Printf("Value: %s, FromCache: %t\n", result.Value, result.FromCache)
 }
 ```
@@ -630,7 +630,7 @@ type User struct {
 
 func main() {
     rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-    
+
     // Create a cache handler for User structs
     userCache := cache.New[User](rdb,
         cache.WithPrefix("users"),
@@ -638,9 +638,9 @@ func main() {
         cache.WithBackgroundRefreshTimeout(5*time.Second),
         cache.WithMissPolicy(cache.MissPolicySyncWriteThenReturn),
     )
-    
+
     ctx := context.Background()
-    
+
     // Generator function that fetches user data
     userGenerator := func(ctx context.Context) (User, error) {
         // Simulate database lookup or API call
@@ -650,14 +650,14 @@ func main() {
             Email:    "john@example.com",
         }, nil
     }
-    
+
     // GetOrRefresh will use cached data if available,
     // or generate and cache new data if missing
     result, err := userCache.GetOrRefresh(ctx, "123", userGenerator)
     if err != nil {
         panic(err)
     }
-    
+
     fmt.Printf("User: %+v, FromCache: %t\n", result.Value, result.FromCache)
 }
 ```
@@ -757,7 +757,7 @@ Yes     No │missSyncWrite     │   │Generate + Return│
 │       │  │ThenReturn       │   │+ Background     │
 ▼       ▼  │        │        │   │Write           │
 [Spawn  [Return     ▼        │   │        │       │
-bg      cached  [Acquire     │   │        ▼       │  
+bg      cached  [Acquire     │   │        ▼       │
 refresh] result] per-key     │   │ [Generate data  │
 │       │        lock]       │   │  immediately]  │
 │       │           │        │   │        │       │
@@ -801,12 +801,12 @@ The cache system uses a two-level configuration approach:
 Handler Creation ─────────────▶ handlerConfig (Global Settings)
                                       │
                                       ├─ prefix: string
-                                      ├─ defaultTTL: time.Duration  
+                                      ├─ defaultTTL: time.Duration
                                       ├─ bgRefreshTimeout: time.Duration
                                       ├─ refreshCooldown: time.Duration
                                       └─ defaultMissPolicy: MissPolicy
 
-Method Call ──────────────────▶ callOpts (Call-specific Overrides)  
+Method Call ──────────────────▶ callOpts (Call-specific Overrides)
                                       │
                                       ├─ ttl: time.Duration
                                       ├─ disableHitRefresh: bool
@@ -852,7 +852,7 @@ Latency │ Memory
 │• Async miss     │ │• Sync miss      │ │• Sync miss      │
 │  policy         │ │  policy         │ │  policy         │
 └─────────────────┘ └─────────────────┘ └─────────────────┘
-   Prioritizes        Prioritizes        Prioritizes  
+   Prioritizes        Prioritizes        Prioritizes
    low latency       high throughput     low memory usage
 ```
 
@@ -899,7 +899,7 @@ go test -v
 
 Key test scenarios:
 - Basic Set/Get operations
-- Cache hits and misses  
+- Cache hits and misses
 - Background refresh functionality
 - Concurrent access safety
 - JSON marshaling/unmarshaling
@@ -927,7 +927,7 @@ Key test scenarios:
 
 ### Planned Features
 - [ ] **Metrics & Observability**: Built-in metrics for hit rates, generation times, and error rates
-- [ ] **Circuit Breaker**: Automatic fallback when cache or generators fail repeatedly  
+- [ ] **Circuit Breaker**: Automatic fallback when cache or generators fail repeatedly
 - [ ] **Cache Warming**: Pre-populate cache with commonly accessed data
 - [ ] **Batch Operations**: Support for getting/setting multiple keys efficiently
 - [ ] **Custom Serializers**: Support for non-JSON serialization (protobuf, msgpack, etc.)
@@ -950,7 +950,7 @@ Key test scenarios:
 - [ ] **Documentation**: Interactive examples and best practices guide
 - [ ] **Benchmarking Suite**: Performance testing and comparison tools
 
-### Enterprise Features  
+### Enterprise Features
 - [ ] **Multi-Region Support**: Cross-region cache synchronization
 - [ ] **Access Control**: Key-level permissions and authentication
 - [ ] **Audit Logging**: Detailed logging of cache operations
@@ -1011,7 +1011,7 @@ This section lists other open source caching libraries and their approach to cac
 
 #### [ben-manes/caffeine](https://github.com/ben-manes/caffeine) (Java)
 - **Focus**: High-performance Java caching library
-- **Miss Policies**: 
+- **Miss Policies**:
   - Refresh-ahead (similar to our `MissPolicyRefreshAhead`)
   - Async refresh (similar to our `MissPolicyReturnThenAsyncWrite`)
   - Custom loading strategies
@@ -1118,7 +1118,7 @@ This section lists other open source caching libraries and their approach to cac
 
 This implementation draws inspiration from:
 - **Caffeine** (Java) - Multi-policy approach and refresh-ahead
-- **Varnish** - Stale-while-revalidate concepts  
+- **Varnish** - Stale-while-revalidate concepts
 - **Netflix EVCache** - Fail-fast and distributed patterns
 - **Academic papers** on probabilistic caching and cache stampede prevention
 - **CDN technologies** like Cloudflare and Fastly for SWR patterns

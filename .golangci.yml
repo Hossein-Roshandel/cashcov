@@ -468,3 +468,9 @@ linters:
           - gosec
           - noctx
           - wrapcheck
+      - path: examples/*  # Excludes all files under the example folder
+        linters:
+          - nolintlint
+          - forbidigo
+          - gosec
+          - mnd
