@@ -1,4 +1,5 @@
 go 1.25.1
+module github.com/Hossein-Roshandel/cashcov
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -10,5 +11,3 @@ require (
 	github.com/redis/go-redis/v9 v9.14.0
 	github.com/joho/godotenv v1.5.1
 )
-
-module cache

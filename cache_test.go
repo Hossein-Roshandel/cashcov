@@ -1,7 +1,6 @@
 package cache_test //nolint:cyclop // TODO: fix later the average complexity for the package cache_test is 19.000000, max is 10.000000
 
 import (
-	"cache"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	cache "github.com/Hossein-Roshandel/cashcov"
 	"github.com/go-redis/redismock/v9"
 	"github.com/redis/go-redis/v9"
 )

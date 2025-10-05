@@ -7,8 +7,7 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"cache"
-
+	cache "github.com/Hossein-Roshandel/cashcov"
 	"github.com/redis/go-redis/v9"
 )
 
