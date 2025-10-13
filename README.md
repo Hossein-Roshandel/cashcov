@@ -475,7 +475,7 @@ Yes     No                    │
 ## 📦 Installation
 
 ```bash
-go get github.com/your-username/redis-wrapper
+go get github.com/Hossein-Roshandel/cashcov
 ```
 
 ## 🛠 Prerequisites
