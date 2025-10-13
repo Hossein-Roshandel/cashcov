@@ -54,9 +54,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Switch to vscode user
 USER vscode
-WORKDIR /workspace
 
 RUN uv tool install pre-commit --with pre-commit-uv
+
+WORKDIR /workspace
 
 # Default command for dev container
 CMD ["bash"]

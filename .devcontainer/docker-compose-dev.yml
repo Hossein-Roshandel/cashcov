@@ -3,11 +3,11 @@ version: '3.8'
 services:
   dev:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: .devcontainer/Dockerfile.dev
     container_name: redis-wrapper-dev
     volumes:
-      - .:/workspace:cached
+      - ..:/workspace:cached
       - go-mod-cache:/go/pkg/mod
     working_dir: /workspace
     ports:
