@@ -6,6 +6,8 @@
             "type": "shell",
             "command": "docker-compose",
             "args": [
+                "-f",
+                ".devcontainer/docker-compose.yml",
                 "up",
                 "-d"
             ],
@@ -23,6 +25,8 @@
             "type": "shell",
             "command": "docker-compose",
             "args": [
+                "-f",
+                ".devcontainer/docker-compose.yml",
                 "down"
             ],
             "group": "build",

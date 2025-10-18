@@ -6,7 +6,7 @@
 set -e
 
 PROJECT_NAME="redis-wrapper"
-COMPOSE_FILE="docker-compose.yml"
+COMPOSE_FILE=".devcontainer/docker-compose.yml"
 
 # Colors for output
 RED='\033[0;31m'
