@@ -34,7 +34,7 @@ A high-performance, type-safe Redis caching library for Go with advanced feature
 
 - **Type Safety**: Leverages Go 1.18+ generics for compile-time type safety
 - **Flexible Miss Policies**: Choose between sync and async cache miss handling
-- **Background Refresh**: Automatically refresh cached data in the background to prevent cache stampede
+- **Background Refresh**: Automatically refresh cached data in the background reduce data staleness and use mutex to prevent cache stampede
 - **Configurable TTL**: Set default and per-call TTL values
 - **Thread Safety**: Built-in per-key locking prevents race conditions
 - **JSON Serialization**: Automatic marshaling/unmarshaling of complex data types
@@ -45,45 +45,97 @@ A high-performance, type-safe Redis caching library for Go with advanced feature
 
 ### System Architecture Diagram
 
+The cache system's behavior can be best understood through its interaction flows. The sequence diagram below illustrates three key scenarios:
+
+1. **Cache Hit Flow**:
+   - Initial key lookup in Redis
+   - Check for staleness using lastRefreshByKey
+   - Optional background refresh through Light Green section
+   - Immediate return of cached value
+
+2. **Cache Miss Flow**:
+   - Two possible policies when data is not found:
+     - SyncWriteThenReturn: Block until data is generated and stored
+     - ReturnThenAsyncWrite: Return generated data immediately, store asynchronously in Orchid section
+
+3. **Background Operations**:
+   - Light Green section: Background refresh for stale data
+   - Orchid section: Async write workers for ReturnThenAsyncWrite policy
+   - Lock management via KeyedMutex to prevent cache stampede
+   - Cooldown checks to prevent excessive refreshes
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant H as Handler<T>
+    participant KM as KeyedMutex
+    participant R as Redis
+    participant BG as Background<br/>Workers
+    participant G as Generator<T>
+    participant E as External<br/>Source
+
+    rect rgba(100, 149, 237, 0.2)
+        Note right of C: Cache Hit Flow
+        C->>+H: GetOrRefresh(key, generator)
+        H->>R: GET key
+        R-->>H: Value exists
+        H->>H: Check if stale<br/>(lastRefreshByKey)
+
+        alt Needs Background Refresh
+            rect rgba(144, 238, 144, 0.25)
+                H->>BG: Spawn refresh worker
+                Note over BG: Async with timeout
+                BG->>KM: TryLock key
+                BG->>G: Generate new value
+                G->>E: Fetch data
+                E-->>G: Return data
+                G-->>BG: Return value
+                BG->>R: SET key
+                BG->>KM: Release lock
+            end
+        end
+        H-->>-C: Return Result<T><br/>(fromCache: true)
+    end
+
+    rect rgba(255, 182, 193, 0.25)
+        Note right of C: Cache Miss Flow
+        C->>+H: GetOrRefresh(key, generator)
+        H->>R: GET key
+        R-->>H: Key not found
+
+        alt SyncWriteThenReturn Policy
+            H->>KM: TryLock key
+            H->>G: Generate value
+            G->>E: Fetch data
+            E-->>G: Return data
+            G-->>H: Return value
+            H->>R: SET key
+            H->>KM: Release lock
+            H-->>-C: Return Result<T><br/>(fromCache: false)
+        else ReturnThenAsyncWrite Policy
+            rect rgba(218, 112, 214, 0.25)
+                H->>KM: TryLock key
+                H->>G: Generate value
+                G->>E: Fetch data
+                E-->>G: Return data
+                G-->>H: Return value
+                H->>BG: Spawn write worker
+                H-->>C: Return Result<T><br/>(fromCache: false)
+                Note over BG: Async operation
+                BG->>R: SET key
+                BG->>KM: Release lock
+            end
+        end
+    end
 ```
-┌─────────────────┐
-│ Client App      │
-└─────────┬───────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Handler<T>                                │
-│  ┌─────────────┐ ┌──────────────┐ ┌─────────────────────┐   │
-│  │handlerConfig│ │ keyedMutex   │ │lastRefreshByKey Map │   │
-│  └─────────────┘ └──────────────┘ └─────────────────────┘   │
-└─────────┬───────────────────────────────────┬───────────────┘
-          │                                   │
-          ▼                                   ▼
-┌─────────────────┐                 ┌─────────────────────┐
-│   Redis Server  │◄────────────────┤Background Goroutines│
-│                 │                 │                     │
-│ ┌─────────────┐ │                 │ ┌─────────────────┐ │
-│ │ GET/SET/    │ │                 │ │Background       │ │
-│ │ EXISTS      │ │                 │ │Refresh Worker   │ │
-│ │ Operations  │ │                 │ └─────────────────┘ │
-│ └─────────────┘ │                 │ ┌─────────────────┐ │
-└─────────────────┘                 │ │Async Miss       │ │
-          ▲                         │ │Write Worker     │ │
-          │                         │ └─────────────────┘ │
-          │                         └─────────────────────┘
-          │                                   │
-          │                                   ▼
-          │                         ┌─────────────────┐
-          └─────────────────────────┤Generator<T>     │
-                                    │Function         │
-                                    └─────────┬───────┘
-                                              │
-                                              ▼
-                                    ┌─────────────────┐
-                                    │External Data    │
-                                    │Source (DB/API)  │
-                                    └─────────────────┘
-```
+
+Key benefits of this architecture:
+- **Type Safety**: Generic `Handler<T>` ensures compile-time type checking
+- **Concurrency Control**: Per-key locking via `KeyedMutex` prevents cache stampede
+- **Flexible Policies**: Choose between immediate consistency (sync) or better latency (async)
+- **Background Refresh**: Keep cache fresh without blocking client requests
+- **Cooldown Management**: Prevent excessive updates with configurable refresh intervals
 
 ### Core Components
 
