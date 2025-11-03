@@ -20,7 +20,8 @@
                 "redhat.vscode-yaml",
                 "ms-vscode.vscode-docker",
                 "mhutchie.git-graph",
-                "eamodio.gitlens"
+                "eamodio.gitlens",
+                "mermaidchart.vscode-mermaid-chart"
             ],
             "settings": {
                 "go.toolsManagement.checkForUpdates": "local",
