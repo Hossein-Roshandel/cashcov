@@ -474,3 +474,17 @@ linters:
           - forbidigo
           - gosec
           - mnd
+      # cshim is a CGo package. The CGo toolchain injects boilerplate that
+      # triggers linters we cannot suppress in source, and the exported C
+      # symbols are required to use underscore naming by the //export directive.
+      - path: cshim/
+        linters:
+          - gochecknoglobals  # handle registry globals are intentional
+          - nakedret           # _cgo_cmalloc is CGo-generated
+          - nonamedreturns     # CGo-generated code uses named returns
+      - path: cshim/
+        text: "don't use underscores in Go names"
+        linters: [ revive ]
+      - path: cshim/
+        text: "should not use underscores in Go names"
+        linters: [ staticcheck ]

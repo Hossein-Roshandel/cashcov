@@ -75,3 +75,16 @@ tmp/
 
 # Pre-commit cache
 .pre-commit-config.yaml.cache
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# CGo generated C header (produced by go build -buildmode=c-shared)
+python/cashcov/libcashcov.h
+cshim/libcashcov.h

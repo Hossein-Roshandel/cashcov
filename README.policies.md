@@ -108,6 +108,21 @@ Configure sensitivity with `WithProbabilisticBeta(1.0)`. Higher beta → more ag
 
 **Requires**: a `@created` timestamp recorded at fill time. This is done automatically inside `GetOrRefresh` when this policy is active.
 
+### `HitRefreshOlderThan`
+| Attribute | Value |
+|-----------|-------|
+| Trigger | Entry age exceeds a configured duration |
+| Coordination | None |
+| Best for | Workloads with a known acceptable staleness window |
+
+Triggered when the entry's age (time since the `@created` metadata tag was written) exceeds the configured threshold. Unlike `HitRefreshAhead` (which is relative to remaining TTL), this is an absolute age check.
+
+Configure with `WithRefreshOlderThanAge(d time.Duration)` (handler-level default) or `WithCallRefreshOlderThanAge(d time.Duration)` (per-call override).
+
+**Best for**: time-sensitive data where you want a guaranteed maximum staleness regardless of TTL, such as exchange rates, live scores, or inventory levels.
+
+**Requires**: a `@created` timestamp recorded at fill time. This is done automatically inside `GetOrRefresh` when this policy is active.
+
 ### `HitRefreshNone`
 Disables all background refresh on cache hits. The entry will expire at TTL and be regenerated on the next miss.
 
@@ -143,42 +158,16 @@ When a Redis miss is confirmed, before invoking the fill policy the handler chec
 2. **Yes** → retry `GET` once. If the key is now in Redis (written by a concurrent goroutine), return it without calling the generator.
 3. **No** (key still absent — evicted, TTL elapsed again) → proceed to the fill policy as normal.
 
-```
-Redis miss confirmed
-        │
-        ▼
-missDeduplicationWindow > 0?
-        │
-    ┌───┴───┐
-    │       │
-   Yes      No
-    │       │
-    ▼       ▼
-Check        [Dispatch fill policy]
-lastRefreshByKey
-    │
-    ▼
-Written within window?
-    │
-┌───┴───┐
-│       │
-Yes     No
-│       │
-▼       ▼
-Retry   [Dispatch fill policy]
-Redis GET
-    │
-    ▼
-Key exists now?
-    │
-┌───┴───┐
-│       │
-Yes     No
-│       │
-▼       ▼
-Return  [Dispatch fill policy]
-cached  (generator must run)
-value
+```mermaid
+flowchart TD
+    A[Redis miss confirmed] --> B{missDeduplicationWindow > 0?}
+    B -->|No| G[Dispatch fill policy]
+    B -->|Yes| C{Written within window\nby this process?}
+    C -->|No| G
+    C -->|Yes| D[Retry Redis GET]
+    D --> E{Key exists now?}
+    E -->|Yes| F[Return cached value]
+    E -->|No| G[Dispatch fill policy]
 ```
 
 ### Effect on stampede
@@ -233,6 +222,13 @@ cache.New[Product](rdb,
     cache.WithRefreshAheadThreshold(0.2),
 )
 
+// Time-sensitive data: sync fill + older-than refresh + surface errors
+cache.New[Price](rdb,
+    cache.WithMissFillPolicy(cache.MissFillSync),
+    cache.WithDefaultHitRefreshPolicy(cache.HitRefreshOlderThan),
+    cache.WithRefreshOlderThanAge(30*time.Second),
+)
+
 // Dashboard widgets: stale-while-revalidate + probabilistic hit refresh + zero value on error
 cache.New[Stats](rdb,
     cache.WithMissFillPolicy(cache.MissFillStaleOrSync),
@@ -280,6 +276,7 @@ if errors.Is(err, cache.ErrCacheMiss) {
 | `HitRefreshDefault` | Every hit (cooldown-gated) | None |
 | `HitRefreshAhead` | TTL < threshold | None |
 | `HitRefreshProbabilistic` | Probabilistic (age-based) | None |
+| `HitRefreshOlderThan` | Entry age > threshold | None |
 | `HitRefreshNone` | Never | N/A |
 
 ### Error Handling

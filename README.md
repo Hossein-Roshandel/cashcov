@@ -143,113 +143,87 @@ The cache system consists of several key components working together:
 
 #### 1. **Handler[T]** - Main Cache Interface
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Handler<T>                          │
-├─────────────────────────────────────────────────────────┤
-│ Fields:                                                 │
-│  • config: handlerConfig                                │
-│  • localLocks: keyedMutex                               │
-│  • lastRefreshByKey: map[string]time.Time               │
-│  • lastRefreshMu: sync.Mutex                            │
-├─────────────────────────────────────────────────────────┤
-│ Methods:                                                │
-│  • New(rdb, opts) Handler<T>                            │
-│  • Get(ctx, key) Result<T>                              │
-│  • Set(ctx, key, value, opts) error                     │
-│  • GetOrRefresh(ctx, key, gen, opts) Result<T>          │
-└─────────────────────────────────────────────────────────┘
-                              │
-                              ├─── produces ───┐
-                              │                │
-                              ▼                ▼
-        ┌─────────────────────────────┐  ┌──────────────────────┐
-        │        Result<T>            │  │    Generator<T>      │
-        ├─────────────────────────────┤  ├──────────────────────┤
-        │ • Value: T                  │  │ Function Type:       │
-        │ • FromCache: bool           │  │ func(context.Context)│
-        │ • CachedAt: time.Time       │  │    (T, error)        │
-        └─────────────────────────────┘  └──────────────────────┘
+```mermaid
+classDiagram
+    class HandlerT["Handler[T]"] {
+        +config handlerConfig
+        +localLocks KeyedMutex
+        +lastRefreshByKey map~string~time.Time
+        +lastRefreshMu sync.Mutex
+        +New(rdb, opts) Handler
+        +Get(ctx, key) Result
+        +Set(ctx, key, value, opts) error
+        +GetOrRefresh(ctx, key, gen, opts) Result
+    }
+    class ResultT["Result[T]"] {
+        +Value T
+        +FromCache bool
+        +CachedAt time.Time
+    }
+    class GeneratorT["Generator[T]"] {
+        <<function>>
+        +func(ctx) T, error
+    }
+    HandlerT --> ResultT : produces
+    HandlerT --> GeneratorT : calls on miss
 ```
 
 #### 2. **Configuration System**
 
-```
-Configuration Levels:
-
-┌─────────────────────┐         ┌─────────────────────┐
-│   Option Functions  │────────▶│   handlerConfig    │
-└─────────────────────┘         │ (Handler Level)     │
-                                ├─────────────────────┤
-                                │ • rdb: *redis.Client│
-                                │ • prefix: string    │
-                                │ • defaultTTL        │
-                                │ • bgRefreshTimeout  │
-                                │ • refreshCooldown   │
-                                │ • defaultMissFillPolicy │
-                                └─────────────────────┘
-
-┌─────────────────────┐         ┌─────────────────────┐
-│CallOption Functions │────────▶│     callOpts        │
-└─────────────────────┘         │  (Per-Call Level)   │
-                                ├─────────────────────┤
-                                │ • ttl: time.Duration│
-                                │ • disableHitRefresh │
-                                │ • overrideMissFillPolicy│
-                                └─────────────────────┘
+```mermaid
+flowchart LR
+    A["Option functions\n(WithPrefix, WithDefaultTTL…)"] -->|applied at New| B["handlerConfig\n(handler defaults)"]
+    C["CallOption functions\n(WithTTL, WithCallMissFillPolicy…)"] -->|applied per call| D["callOpts\n(per-call overrides)"]
+    B --> E[GetOrRefresh]
+    D -->|higher priority| E
+    E --> F[Resolved behaviour]
 ```
 
 ### Data Flow
 
-The following shows how data flows through the cache system during different operations:
+#### Cache Hit Scenario
 
-#### Cache Hit Scenario:
-```
-Client ──GetOrRefresh(key,gen)──▶ Handler ──Get(key)──▶ Redis
-   ▲                                 │                    │
-   │                                 ▼                    │
-   │                           shouldRefreshNow(key)?     │
-   │                                 │                    │
-   │                                 ▼                    ▼
-   │                            spawn background      Data exists
-   │                               refresh               │
-   │                                 │                   │
-   │                                 ▼                   │
-   │                          Background Worker          │
-   │                                 │                   │
-   │                                 ├─TryLock(key)      │
-   │                                 ├─Generate(fresh)   │
-   │                                 └─Set(key,data)─────┘
-   │
-   └──Result{value, fromCache: true}──────────────────┘
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant H as Handler
+    participant R as Redis
+    participant BG as Background Goroutine
+    participant G as Generator
+
+    C->>H: GetOrRefresh(key, gen)
+    H->>R: GET key
+    R-->>H: value (cache hit)
+    H-->>C: Result{fromCache: true}
+    H->>BG: go spawnBackgroundRefresh (if policy triggers)
+    BG->>H: TryLock(key)
+    BG->>G: Generate(ctx)
+    G-->>BG: new value
+    BG->>R: SET key
+    BG->>H: Unlock(key)
 ```
 
-#### Cache Miss Scenario (Sync Policy):
-```
-Client ──GetOrRefresh(key,gen)──▶ Handler ──Get(key)──▶ Redis
-   ▲                                 │                    │
-   │                                 ▼                    ▼
-   │                            Key not found         Key not found
-   │                                 │
-   │                                 ▼
-   │                           Lock(key)
-   │                                 │
-   │                                 ▼
-   │                         Get(key) [double-check] ────▶ Redis
-   │                                 │                    │
-   │                                 ▼                    ▼
-   │                          Still not found      Still not found
-   │                                 │
-   │                                 ▼
-   │                          Generate(data) ◄──── Generator
-   │                                 │
-   │                                 ▼
-   │                          Set(key,data) ─────▶ Redis
-   │                                 │
-   │                                 ▼
-   │                           Unlock(key)
-   │                                 │
-   └──Result{value, fromCache: false}─┘
+#### Cache Miss Scenario (MissFillSync)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant H as Handler
+    participant KM as KeyedMutex
+    participant R as Redis
+    participant G as Generator
+
+    C->>H: GetOrRefresh(key, gen)
+    H->>R: GET key
+    R-->>H: redis.Nil (miss)
+    H->>KM: Lock(key)
+    H->>R: GET key (double-check)
+    R-->>H: redis.Nil (still missing)
+    H->>G: Generate(ctx)
+    G-->>H: value
+    H->>R: SET key
+    H->>KM: Unlock(key)
+    H-->>C: Result{fromCache: false}
 ```
 
 ## 🔄 Cache Behaviour Policies
@@ -264,41 +238,30 @@ Cache behaviour is controlled by **three independent axes** that can be combined
 
 ### Miss-Fill Policy Decision Flow
 
-```
-GetOrRefresh Called
-        │
-        ▼
-   Key exists in Redis?
-        │
-    ┌───┴───┐
-    │       │
-   Yes      No
-    │       │
-    ▼       ▼
-[Cache Hit] [Cache Miss]
-    │           │
-    ▼           ▼
-HitRefreshPolicy   MissFillPolicy
-(see below)        │
-              ┌────┴──────────────────────┐
-              │                           │
-           MissFillSync            MissFillAsync
-        MissFillCooperative      MissFillStaleOrSync
-              │                    MissFillFailFast
-              ▼
-    ┌─────────────────┐
-    │ Acquire per-key │
-    │ lock            │
-    │      ▼          │
-    │ Double-check    │
-    │ cache           │
-    │      ▼          │
-    │ Generate data   │
-    │      ▼          │
-    │ Write to Redis  │
-    │      ▼          │
-    │ Return value    │
-    └─────────────────┘
+```mermaid
+flowchart TD
+    A[GetOrRefresh called] --> B{Key in Redis?}
+    B -->|Yes - Cache Hit| C{HitRefreshPolicy?}
+    B -->|No - Cache Miss| D{MissFillPolicy?}
+
+    C -->|DEFAULT| C1[Refresh if cooldown elapsed]
+    C -->|AHEAD| C2[Refresh if remaining TTL pct below threshold]
+    C -->|PROBABILISTIC| C3[XFetch: refresh with age-based probability]
+    C -->|OLDER_THAN| C4[Refresh if entry age exceeds threshold]
+    C -->|NONE| C5[No refresh]
+    C1 & C2 & C3 & C4 --> C6[Spawn background refresh goroutine]
+    C5 --> Z[Return cached value]
+    C6 --> Z
+
+    D -->|SYNC| D1[Lock → double-check → generate → write → return]
+    D -->|ASYNC| D2[Generate → return → background write]
+    D -->|STALE_OR_SYNC| D3{Stale data exists?}
+    D -->|FAIL_FAST| D4[Return ErrCacheMiss immediately]
+    D -->|COOPERATIVE| D5[Try-lock with timeout]
+    D3 -->|Yes| D6[Return stale → background refresh]
+    D3 -->|No| D1
+    D5 -->|Lock acquired| D1
+    D5 -->|Timeout| D7[Generate directly without caching]
 ```
 
 ### Miss-Fill Policy Comparison
@@ -318,6 +281,7 @@ HitRefreshPolicy   MissFillPolicy
 | `HitRefreshDefault` *(default)* | Every hit, gated by `refreshCooldown` | General use |
 | `HitRefreshAhead` | Remaining TTL drops below threshold | Predictable workloads, avoid cold misses |
 | `HitRefreshProbabilistic` | XFetch algorithm — probability rises with age | Distributed load distribution, large fleets |
+| `HitRefreshOlderThan` | Entry age exceeds a configured threshold | Workloads with known staleness tolerance, time-sensitive data |
 | `HitRefreshNone` | Never | Read-heavy, TTL expiry is acceptable |
 
 ### Error Policy
@@ -329,95 +293,53 @@ HitRefreshPolicy   MissFillPolicy
 
 > `ErrCacheMiss` (returned by `MissFillFailFast`) is **never** suppressed by `ErrorPolicyZeroValue` — it is an intentional signal, not a generation failure.
 
+```mermaid
+flowchart LR
+    subgraph SYNC["MissFillSync — strong consistency"]
+        direction TB
+        s1[Cache miss] --> s2[Acquire per-key lock]
+        s2 --> s3[Double-check cache]
+        s3 --> s4[Generate data]
+        s4 --> s5[Write to Redis]
+        s5 --> s6[Return data to caller]
+    end
+    subgraph ASYNC["MissFillAsync — lowest latency"]
+        direction TB
+        a1[Cache miss] --> a2[Generate data]
+        a2 --> a3[Return data to caller immediately]
+        a3 --> a4[Background: try-lock]
+        a4 --> a5[Background: double-check and write]
+    end
 ```
-┌─────────────────────────────────┐   ┌─────────────────────────────────┐
-│       MissFillSync              │   │        MissFillAsync            │
-├─────────────────────────────────┤   ├─────────────────────────────────┤
-│  [Cache Miss]                   │   │  [Cache Miss]                   │
-│      │                          │   │      │                          │
-│      ▼                          │   │      ▼                          │
-│  [Acquire Lock]                 │   │  [Generate Data]                │
-│      │                          │   │      │                          │
-│      ▼                          │   │      ▼                          │
-│  [Double Check]                 │   │  [Return Data immediately] ◄───│
-│      │                          │   │      │                          │
-│      ▼                          │   │      ▼                          │
-│  [Generate Data]                │   │  [Background: Try Lock]         │
-│      │                          │   │      │                          │
-│      ▼                          │   │      ▼                          │
-│  [Write to Redis]               │   │  [Background: Check & Write]    │
-│      │                          │   │                                 │
-│      ▼                          │   │                                 │
-│  [Return Data] ◄────────────────│   │                                 │
-└─────────────────────────────────┘   └─────────────────────────────────┘
-     Slower response time                    Faster response time
-     Strong consistency                      Eventual consistency
-     Prevents cache stampede                 May allow cache stampede
-```
+
+> **Stampede note (MissFillAsync)**: The background write is protected by a try-lock, but every concurrent caller in the *first miss wave* still invokes the generator. Use `WithMissDeduplicationWindow` to suppress duplicate generation after the first write.
 
 ## 🔒 Concurrency & Locking
 
 ### Keyed Mutex System
 
-The cache uses a sophisticated per-key locking mechanism to prevent race conditions and cache stampede:
+The cache uses a per-key locking mechanism to prevent race conditions and cache stampede. Different keys never block each other.
 
-```
-Request for Key X
-      │
-      ▼
-keyedMutex.Lock(X)
-      │
-      ▼
-Check if channel exists for Key X
-      │
-  ┌───┴───┐
-  │       │
-Exists   Does not exist
-  │       │
-  ▼       ▼
-Use existing   Create new
-channel        channel
-  │       │
-  └───┬───┘
-      │
-      ▼
-Try to acquire lock
-      │
-      ▼
-Channel available?
-      │
-  ┌───┴───┐
-  │       │
- Yes      No
-  │       │
-  ▼       ▼
-[Acquire lock]  [Block until available]
-     │               │
-     └───────┬───────┘
-             │
-             ▼
-    [Perform cache operation]
-             │
-             ▼
-       [Release lock]
-             │
-             ▼
-    [Return unlock function]
-
-Per-Key Channel Map:
-┌─────────────────────────────────────┐
-│ Key 'user:1'     → chan struct{}    │
-│ Key 'user:2'     → chan struct{}    │
-│ Key 'product:123'→ chan struct{}    │
-│ ...                                 │
-└─────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[Request for Key X] --> B[keyedMutex.Lock X]
+    B --> C{Channel exists\nfor Key X?}
+    C -->|Yes| D[Use existing channel]
+    C -->|No| E[Create new buffered channel]
+    D & E --> F[Send to channel]
+    F --> G{Channel slot\navailable?}
+    G -->|Yes| H[Lock acquired immediately]
+    G -->|No| I[Block until prior holder reads]
+    H & I --> J[Perform cache operation]
+    J --> K[Read from channel — release lock]
+    K --> L[Return unlock function to caller]
 ```
 
-**Key Benefits:**
-- **Prevents Cache Stampede**: Only one goroutine per key can generate data
-- **Fine-grained Locking**: Different keys don't block each other
-- **Memory Efficient**: Channels are created on-demand
-- **Deadlock Safe**: Simple channel-based implementation
+**Key benefits:**
+- **Prevents cache stampede**: only one goroutine per key can generate data at a time
+- **Fine-grained**: different keys never block each other
+- **Memory efficient**: channels created on demand, cleaned up on unlock
+- **Deadlock safe**: simple channel-based implementation with no nested locks
 
 ## ⏱️ Background Operations
 
@@ -425,104 +347,44 @@ Per-Key Channel Map:
 
 Background refresh keeps cached data fresh without blocking client requests:
 
-```
-Client ──GetOrRefresh(key,gen)──▶ Handler ──Get(key)──▶ Redis
-   ▲                                 │                    │
-   │                                 ▼                    ▼
-   │                         shouldRefreshNow(key)?   Cached data (hit)
-   │                                 │                    │
-   │                                 ▼                    │
-   │                          Refresh needed?            │
-   │                                 │                    │
-   │                                 ▼                    │
-   │                         spawn background            │
-   │                           refresh                    │
-   │                                 │                    │
-   │                                 ▼                    │
-   │         ┌─────────── Background Goroutine           │
-   │         │            (timeout context)              │
-   │         │                     │                     │
-   │         │                     ▼                     │
-   │         │              TryLock(key) ─────▶ LocalLocks
-   │         │                     │                     │
-   │         │                     ▼                     │
-   │         │              Lock acquired?               │
-   │         │                     │                     │
-   │         │                     ▼                     │
-   │         │           Check refresh cooldown          │
-   │         │                     │                     │
-   │         │                     ▼                     │
-   │         │            Cooldown passed?               │
-   │         │                     │                     │
-   │         │                     ▼                     │
-   │         │           Generate fresh data ◄─── Generator
-   │         │                     │                     │
-   │         │                     ▼                     │
-   │         │            Set(key, newData) ────▶ Redis  │
-   │         │                     │                     │
-   │         │                     ▼                     │
-   │         │         Update lastRefresh timestamp      │
-   │         │                     │                     │
-   │         │                     ▼                     │
-   │         └──────────── Release lock                  │
-   │                                                     │
-   └──Return cached data (non-blocking) ─────────────────┘
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant H as Handler
+    participant R as Redis
+    participant BG as Background Goroutine
+    participant G as Generator
+
+    C->>H: GetOrRefresh(key, gen)
+    H->>R: GET key
+    R-->>H: value (cache hit)
+    H-->>C: Result{fromCache: true}
+    H->>BG: go spawnBackgroundRefresh(key)
+    BG->>H: TryLock(key)
+    alt Cooldown has elapsed
+        BG->>G: Generate(ctx)
+        G-->>BG: new value
+        BG->>R: SET key
+        BG->>H: setLastRefreshNow(key)
+    end
+    BG->>H: Unlock(key)
 ```
 
 ### Refresh Cooldown Mechanism
 
 The cooldown mechanism prevents excessive background refreshes:
 
-```
-Background Refresh Triggered
-            │
-            ▼
-    refreshCooldown > 0?
-            │
-        ┌───┴───┐
-        │       │
-       Yes      No
-        │       │
-        ▼       ▼
-Check lastRefreshByKey   [Allow refresh]
-       map                    │
-        │                     │
-        ▼                     │
-Key exists in map?            │
-        │                     │
-    ┌───┴───┐                 │
-    │       │                 │
-   Yes      No                │
-    │       │                 │
-    ▼       └─────────────────┤
-Calculate time since          │
-  last refresh                │
-    │                         │
-    ▼                         │
-time.Since(last) >= cooldown? │
-    │                         │
-┌───┴───┐                     │
-│       │                     │
-Yes     No                    │
-│       │                     │
-▼       ▼                     │
-│   [Skip refresh] ──────┐    │
-│                        │    │
-└────────────────────────┼────┘
-                         │
-                         ▼
-                  [Allow refresh]
-                         │
-                         ▼
-                 [Perform refresh]
-                         │
-                         ▼
-            [Update lastRefreshByKey
-                  timestamp]
-                         │
-                         ▼
-              [Return without refreshing
-                  or with refresh]
+```mermaid
+flowchart TD
+    A[Background refresh triggered] --> B{refreshCooldown > 0?}
+    B -->|No| E[Allow refresh]
+    B -->|Yes| C{Key in lastRefreshByKey?}
+    C -->|No| E
+    C -->|Yes| D{time.Since last >= cooldown?}
+    D -->|Yes| E
+    D -->|No| F[Skip refresh — cooldown not yet elapsed]
+    E --> G[Perform refresh]
+    G --> H[Update lastRefreshByKey timestamp]
 ```
 
 ## 📦 Installation
@@ -840,70 +702,33 @@ result, err := handler.GetOrRefresh(ctx, "key", generator,
 
 #### GetOrRefresh Method Flow
 
-```
-GetOrRefresh Called
-        │
-        ▼
-  [Parse CallOptions]
-        │
-        ▼
-   [Try Redis GET]
-        │
-        ▼
-    Cache Hit?
-        │
-    ┌───┴───┐
-    │       │
-   Yes      No
-    │       │
-    ▼       ▼
-Check if    Determine Miss Policy
-background      │
-refresh         ▼
-needed      Which Policy?
-    │           │
-    ▼       ┌───┴───┐
-Should      │       │
-refresh?   Sync    Async
-    │       │       │
-┌───┴───┐   ▼       ▼
-│       │  ┌─────────────────┐   ┌─────────────────┐
-Yes     No │missSyncWrite     │   │Generate + Return│
-│       │  │ThenReturn       │   │+ Background     │
-▼       ▼  │        │        │   │Write           │
-[Spawn  [Return     ▼        │   │        │       │
-bg      cached  [Acquire     │   │        ▼       │
-refresh] result] per-key     │   │ [Generate data  │
-│       │        lock]       │   │  immediately]  │
-│       │           │        │   │        │       │
-└───────┼───────────┼────────│   │        ▼       │
-        │           ▼        │   │ [Return data]  │
-        │    [Double-check   │   │        │       │
-        │     cache]         │   │        ▼       │
-        │           │        │   │ [Spawn bg      │
-        │           ▼        │   │  write         │
-        │    Still missing?  │   │  goroutine]    │
-        │           │        │   └─────────────────┘
-        │       ┌───┴───┐    │
-        │       │       │    │
-        │      Yes      No   │
-        │       │       │    │
-        │       ▼       ▼    │
-        │  [Generate] [Return│
-        │    data]    found] │
-        │       │       │    │
-        │       ▼       │    │
-        │  [Write to    │    │
-        │   Redis]      │    │
-        │       │       │    │
-        │       ▼       │    │
-        │ [Return       │    │
-        │  generated]   │    │
-        │       │       │    │
-        └───────┴───────┴────┘
-                │
-                ▼
-        [Final Result Returned]
+```mermaid
+flowchart TD
+    A[GetOrRefresh called] --> B[Resolve TTL and three policy axes]
+    B --> C[Redis GET key]
+    C --> D{Cache hit?}
+    D -->|Yes| E[handleHitRefresh async]
+    E --> F[Return Result from cache]
+    D -->|"No — redis.Nil"| G{missDeduplicationWindow > 0?}
+    G -->|Yes| H{Written within window by this process?}
+    H -->|Yes| I[Retry Redis GET]
+    I --> J{Found?}
+    J -->|Yes| F
+    J -->|No| K[Dispatch fill policy]
+    H -->|No| K
+    G -->|No| K
+    K --> L{MissFillPolicy?}
+    L -->|SYNC| M[missSyncWriteThenReturn]
+    L -->|ASYNC| N[missReturnThenAsyncWrite]
+    L -->|STALE_OR_SYNC| O[missStaleWhileRevalidate]
+    L -->|FAIL_FAST| P["missFailFast → ErrCacheMiss"]
+    L -->|COOPERATIVE| Q[missCooperativeRefresh]
+    M & N & O & Q --> R{ErrorPolicy?}
+    P --> S[Return ErrCacheMiss]
+    R -->|SURFACE| T[Return result or wrapped error]
+    R -->|ZERO_VALUE| U{Is error ErrCacheMiss?}
+    U -->|Yes| S
+    U -->|No| V[Suppress error, return zero-value Result]
 ```
 
 ## 🔧 Advanced Configuration
@@ -912,34 +737,13 @@ refresh] result] per-key     │   │ [Generate data  │
 
 The cache system uses a two-level configuration approach:
 
-```
-Handler Creation ─────────────▶ handlerConfig (Global Settings)
-                                      │
-                                      ├─ prefix: string
-                                      ├─ defaultTTL: time.Duration
-                                      ├─ bgRefreshTimeout: time.Duration
-                                      ├─ refreshCooldown: time.Duration
-                                      ├─ defaultMissFillPolicy: MissFillPolicy
-                                      ├─ defaultHitRefreshPolicy: HitRefreshPolicy
-                                      └─ defaultErrorPolicy: ErrorPolicy
-
-Method Call ──────────────────▶ callOpts (Call-specific Overrides)
-                                      │
-                                      ├─ ttl: time.Duration
-                                      ├─ disableHitRefresh: bool
-                                      ├─ overrideMissFillPolicy: *MissFillPolicy
-                                      ├─ overrideHitRefreshPolicy: *HitRefreshPolicy
-                                      └─ overrideErrorPolicy: *ErrorPolicy
-
-Configuration Priority:
-┌─────────────────────────────────────────────────────────────┐
-│ Call-level options override Handler-level options          │
-│                                                             │
-│ Example:                                                    │
-│ • Handler has defaultTTL: 5 minutes                       │
-│ • Call specifies WithTTL(30*time.Minute)                  │
-│ • Result: 30 minutes TTL is used for this call            │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A["Option functions\n(WithPrefix, WithDefaultTTL…)"] -->|applied at New| B["handlerConfig\n• prefix\n• defaultTTL\n• bgRefreshTimeout\n• refreshCooldown\n• defaultMissFillPolicy\n• defaultHitRefreshPolicy\n• defaultErrorPolicy\n• missDeduplicationWindow"]
+    C["CallOption functions\n(WithTTL, WithCallMissFillPolicy…)"] -->|applied per-call| D["callOpts\n• ttl override\n• overrideMissFillPolicy\n• overrideHitRefreshPolicy\n• overrideErrorPolicy\n• refreshOlderThanAge"]
+    B --> E[GetOrRefresh]
+    D -->|overrides handler defaults| E
+    E --> F[Resolved behaviour for this call]
 ```
 
 ### Performance Tuning Guide
@@ -952,28 +756,14 @@ Configuration Priority:
 | **MissFillPolicy** | `MissFillAsync` | `MissFillSync` | `MissFillSync` |
 | **HitRefreshPolicy** | `HitRefreshDefault` | `HitRefreshAhead` | `HitRefreshNone` |
 
-```
-Performance Goals
-        │
-        ▼
-  Primary Concern?
-        │
-    ┌───┼───┐
-    │   │   │
-Latency │ Memory
-    │   │   │
-    ▼   ▼   ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│Fast Response    │ │High Volume      │ │Memory Efficient │
-│Configuration    │ │Configuration    │ │Configuration    │
-├─────────────────┤ ├─────────────────┤ ├─────────────────┤
-│• Short TTL      │ │• Longer TTL     │ │• Short TTL      │
-│• Quick timeouts │ │• Longer timeouts│ │• Long cooldowns │
-│• Async miss     │ │• Sync miss      │ │• Sync miss      │
-│  policy         │ │  policy         │ │  policy         │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
-   Prioritizes        Prioritizes        Prioritizes
-   low latency       high throughput     low memory usage
+```mermaid
+flowchart TD
+    A[Primary concern?] --> B[Low latency]
+    A --> C[High throughput]
+    A --> D[Memory efficient]
+    B --> B1["MissFillAsync\nShort TTL\nQuick timeouts\nHitRefreshDefault"]
+    C --> C1["MissFillSync\nLonger TTL\nLonger timeouts\nHitRefreshAhead"]
+    D --> D1["MissFillSync\nShort TTL\nLong cooldowns\nHitRefreshNone"]
 ```
 
 ## 🎯 Use Cases
@@ -1042,6 +832,78 @@ Key test scenarios:
 - Efficient use of Redis commands (GET, SET, EXISTS)
 - JSON marshaling overhead for complex types
 - Configurable timeouts for all operations
+
+### Multi-Language Bindings
+
+The library ships a Python package (`python/`) built on top of a CGo shared
+library (`cshim/`). All three policy axes are fully exposed to Python via
+`IntEnum` constants that mirror the Go iota values exactly.
+
+```python
+import json
+from cashcov import CacheHandler
+from cashcov.policies import MissFillPolicy, HitRefreshPolicy, ErrorPolicy
+
+# Handler-level policy defaults
+with CacheHandler(
+    redis_addr="localhost:6379",
+    prefix="myapp",
+    ttl=300,
+    miss_fill_policy=MissFillPolicy.ASYNC,
+    hit_refresh_policy=HitRefreshPolicy.AHEAD,
+    refresh_ahead_threshold=0.2,
+    error_policy=ErrorPolicy.ZERO_VALUE,
+) as cache:
+    def generate(key: str) -> str:
+        return json.dumps({"result": f"computed for {key}"})
+
+    # Per-call override — bypass dedup and fail fast if no cached value
+    raw = cache.get_or_refresh(
+        "my-key",
+        generate,
+        miss_fill_policy=MissFillPolicy.FAIL_FAST,
+    )
+    if raw:
+        data = json.loads(raw)
+```
+
+Build and install:
+
+```bash
+# Directly from GitHub (no clone needed):
+pip install git+https://github.com/Hossein-Roshandel/cashcov.git#subdirectory=python
+
+# From a local clone:
+make build-shim          # compiles libcashcov.so → python/cashcov/
+pip install -e python/   # editable install (also auto-compiles the shim)
+```
+
+See `python/README.md` for the full API reference and all five example scripts.
+
+#### Future: gRPC service wrapper
+
+The CGo binding requires the shared library to be compiled for each target
+platform and architecture.  A planned alternative is a standalone **gRPC
+service** that wraps this library:
+
+```
+cmd/cashcov-server/   ← Go binary (thin gRPC server over the library)
+proto/cashcov/v1/     ← Protobuf service definition (language-neutral)
+python/cashcov/       ← Python gRPC client (generated stubs + high-level API)
+```
+
+Benefits over the CGo approach:
+
+| | CGo shared library | gRPC service |
+|---|---|---|
+| No compilation per platform | ✗ | ✓ |
+| In-process, zero network overhead | ✓ | ✗ (loopback) |
+| Works from any language without recompile | ✗ | ✓ |
+| Stampede protection crosses processes | ✗ | ✓ |
+| Easy horizontal scaling | ✗ | ✓ (sidecar) |
+
+The gRPC approach is the recommended path for production multi-language
+deployments and is tracked in the roadmap below.
 
 ## 🛣 Roadmap
 

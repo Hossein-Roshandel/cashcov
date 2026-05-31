@@ -2,7 +2,10 @@
 GOPATH := $(shell go env GOPATH)
 GOBIN := $(GOPATH)/bin
 
-.PHONY: help build test test-race test-cover lint lint-fix fmt vet clean deps tidy security-check benchmark profile help
+# Shared library output path (override on the command line if needed)
+SHIM_OUT ?= python/cashcov/libcashcov.so
+
+.PHONY: help build build-shim test test-race test-cover lint lint-fix fmt vet clean deps tidy security-check benchmark profile help
 
 # Default target
 help: ## Show this help message
@@ -12,8 +15,14 @@ help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # Build the project
-build: ## Build the project
+build: ## Build the Go library
 	go build ./...
+
+# Build the CGo shared library for Python
+build-shim: ## Build libcashcov.so (CGo shared library for the Python package)
+	go build -buildmode=c-shared -o $(SHIM_OUT) ./cshim
+	@echo "Shared library written to $(SHIM_OUT)"
+	@echo "Run 'pip install -e python/' to install the Python package"
 
 # Run tests
 test: ## Run tests
@@ -50,6 +59,8 @@ vet: ## Run go vet
 clean: ## Clean build artifacts
 	go clean ./...
 	rm -f coverage.out coverage.html
+	rm -f python/cashcov/libcashcov.so python/cashcov/libcashcov.h
+	rm -f python/cashcov/libcashcov.dylib python/cashcov/cashcov.dll
 
 # Download dependencies
 deps: ## Download dependencies

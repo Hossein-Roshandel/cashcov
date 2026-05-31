@@ -50,19 +50,13 @@ product, err = productCache.GetOrRefresh(ctx, "prod-123", productGenerator)
 ```
 
 **Timeline Visualization**:
-```
-Time:     0min          6min              24min            30min
-          |             |                 |                |
-Cache:    [MISS]────────[HIT]─────────────[HIT+REFRESH]───[EXPIRED]
-          ↓             ↓                 ↓                ↓
-Action:   Fetch DB      Serve cache       Serve cache      Fetch DB
-          Write cache                     + Background     Write cache
-                                          refresh
 
-TTL:      [████████████████████████████████████████████████]
-                                          ↑
-                                    Refresh triggered at 20% remaining
-```
+| Time | Event | Action |
+|------|-------|--------|
+| 0 min | Cache MISS | Fetch from DB, write cache |
+| 6 min | Cache HIT | Serve cached value |
+| 24 min | Cache HIT + background refresh | Serve cached value; refresh triggered at ~20% TTL remaining |
+| 30 min | Cache EXPIRED | Fetch from DB, write cache |
 
 ### 2. High Fan-Out Reads of the Same Source Data
 
@@ -94,22 +88,21 @@ reportCache := cache.New[TrendingReport](rdb,
 ```
 
 **Concurrent Request Flow**:
+
+```mermaid
+flowchart TD
+    R["Requests 1-100 (simultaneous)"] --> L{Per-key lock}
+    L -->|"Request 1 acquires"| C[Check cache — MISS]
+    L -->|"Requests 2-100 wait"| W[Wait for lock]
+    C --> G[Generate: 5 seconds DB query]
+    G --> S[Write to cache]
+    S --> U[Release lock]
+    U --> W2[Waiting requests re-check cache — HIT]
+    W --> W2
+    W2 --> R2[All 100 requests return same result]
 ```
-Request 1 ──────┐
-Request 2 ──────┤
-Request 3 ──────┤         [Acquire Lock]
-   ...          ├────────▶ Check Cache ─────▶ Generate (5s) ───┐
-Request 98 ─────┤              ↓                               │
-Request 99 ─────┤         [Cache Miss]                         │
-Request 100 ────┘              ↓                               │
-                          [Wait for Lock]                      │
-                               │                               │
-                               └──────[Share Result]◀──────────┘
-                                           │
-                                           ▼
-All 100 requests receive the same cached result
-Total DB time: 5 seconds (not 500 seconds)
-```
+
+> Total DB time: **5 seconds** (not 500 seconds)
 
 **Code Example**:
 ```go
@@ -182,55 +175,21 @@ func GetInventoryHandler(w http.ResponseWriter, r *http.Request) {
 ```
 
 **User Experience Flow**:
-```
-User Visit #1 (Cache Empty)
-──────────────────────────────────────────────────────────────────
-Request arrives ──▶ Cache MISS ──▶ Fetch from API (500ms) ──▶ Return
-Response time: 500ms ❌ Slow
 
-User Visit #2 (3 seconds later, within TTL)
-──────────────────────────────────────────────────────────────────
-Request arrives ──▶ Cache HIT ──▶ Return immediately
-Response time: 5ms ✅ Fast
+| Scenario | Response time | Notes |
+|----------|--------------|-------|
+| Visit #1 — cold miss | ~500 ms | API call required |
+| Visit #2 — within TTL | ~5 ms | Cache HIT |
+| Visit #3 — stale data exists | ~8 ms | Return stale + background refresh |
+| Visit after background refresh | ~5 ms | Fresh data from background fetch |
+| Checkout (critical path) | real-time | Cache bypassed; warehouse checked directly |
 
-User Visit #3 (3 minutes later, after TTL expired but within stale window)
-──────────────────────────────────────────────────────────────────
-Request arrives ──▶ Cache EXPIRED ──▶ Check stale data ──▶ Return stale
-                                  └──▶ [Background: Fetch fresh data]
-Response time: 8ms ✅ Fast (user sees slightly old data)
+**Policy Comparison** (Scenario: cache has 2-minute-old inventory data):
 
-User Refresh (2 seconds later)
-──────────────────────────────────────────────────────────────────
-Request arrives ──▶ Cache HIT (fresh data from background fetch)
-Response time: 5ms ✅ Fast + Fresh data
-
-Checkout Flow (Critical Path)
-──────────────────────────────────────────────────────────────────
-Add to cart ──▶ SKIP CACHE ──▶ Real-time warehouse check ──▶ Reserve stock
-Guarantee: 100% accurate at transaction time
-```
-
-**Policy Comparison**:
-```
-Scenario: Inventory changed 1 minute ago, cache has 2-minute-old data
-
-┌──────────────────────────────────────────────────────────────┐
-│ Policy: SyncWriteThenReturn                                  │
-├──────────────────────────────────────────────────────────────┤
-│ User Request ──▶ Cache MISS ──▶ API (500ms) ──▶ Response    │
-│ Response Time: 500ms                                         │
-│ Data Freshness: Current                                      │
-└──────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│ Policy: StaleWhileRevalidate                                 │
-├──────────────────────────────────────────────────────────────┤
-│ User Request ──▶ Return stale (8ms) + Background API call   │
-│ Response Time: 8ms                                           │
-│ Data Freshness: 2 minutes old (acceptable for browse)       │
-│ Next Request: Fresh data available                          │
-└──────────────────────────────────────────────────────────────┘
-```
+| Policy | Response time | Data freshness |
+|--------|--------------|----------------|
+| `MissFillSync` | ~500 ms | Always current |
+| `MissFillStaleOrSync` | ~8 ms | Up to 2 min stale (next request: fresh) |
 
 ### 4. Rarely Changing Datasets with Long Cache Windows
 
@@ -276,75 +235,24 @@ func DashboardHandler(w http.ResponseWriter, r *http.Request) {
 ```
 
 **User Experience Timeline**:
-```
-Month: October 2025
-Data Update Cycle: Once per month (typically first week of next month)
 
-Day 1 (Nov 1): First Access After Data Available
-──────────────────────────────────────────────────────────────────
-Manager opens dashboard
-    ↓
-Cache: MISS (no data for October yet)
-    ↓
-Generate: Query DB (5 seconds) ──▶ Response
-    ↓
-Cache: Store with 30-day TTL
-    ↓
-Response Time: 5000ms ❌ Slow but expected
+| Date | Cache state | Response time | Notes |
+|------|------------|--------------|-------|
+| Nov 1 — first access | MISS | ~5 s | Cold start; DB query required |
+| Nov 1–30 | HIT | ~10 ms | All accesses served from cache |
+| Dec 1 — data updated | HIT | ~10 ms | Stale October data served; background refresh starts |
+| Dec 1 — next access | HIT | ~10 ms | Fresh November data available |
 
-Day 1-30 (Nov 1 - Nov 30): Repeated Access
-──────────────────────────────────────────────────────────────────
-Any user opens dashboard
-    ↓
-Cache: HIT ──▶ Immediate response
-    ↓
-Response Time: 10ms ✅ Instant
+With `HitRefreshAhead` (`refresh_ahead_threshold=0.2`): background refresh triggers at Day 24 (80% of TTL elapsed), ensuring fresh data is available before Dec 1.
 
-Day 31 (Dec 1): New Data Available + First Access
-──────────────────────────────────────────────────────────────────
-Manager opens dashboard
-    ↓
-Cache: HIT (October data still valid, within 30-day TTL)
-    ↓
-Return cached data (10ms) ✅
-    ↓
-[Background check: TTL approaching end or data changed?]
-    ↓
-[Background: Refresh cache with November data]
-    ↓
-Next access: Fresh November data available
+**Performance Comparison** (100 dashboard views per day):
 
-Alternative with Refresh-Ahead:
-──────────────────────────────────────────────────────────────────
-Day 24 (Nov 24): 80% of TTL elapsed
-    ↓
-First access triggers background refresh
-    ↓
-User gets October data (10ms) ✅
-    ↓
-Background: Pre-fetch November data if available
-    ↓
-Cache stays warm without noticeable delays
-```
-
-**Performance Comparison**:
-```
-Scenario: 100 dashboard views per day
-
-WITHOUT CACHING:
-────────────────────────────────────────────────────────────
-100 views × 5 seconds = 500 seconds of DB query time per day
-30 days × 500 seconds = 15,000 seconds = 4.2 hours DB time
-User experience: 5-second wait every time ❌
-
-WITH CASHCOV:
-────────────────────────────────────────────────────────────
-Day 1: 1 view × 5 seconds = 5 seconds
-Day 2-30: 99 views × 0.01 seconds = 0.99 seconds
-Total: ~6 seconds DB time for entire month ✅
-User experience: 10ms after first load ✅
-DB load reduction: 99.96%
-```
+| | Without caching | With cashcov |
+|---|---|---|
+| DB time per day | 100 × 5 s = **500 s** | Day 1: 5 s; Days 2–30: ~0 s |
+| DB time per month | 15,000 s (4.2 h) | **~6 s total** |
+| User experience | 5 s wait every time | 10 ms after first load |
+| DB load reduction | — | **99.96 %** |
 
 ### 5. Statistically Accurate, Non-Critical Aggregates
 
@@ -387,73 +295,37 @@ func FindNearbyStations(ctx context.Context, lat, lon float64) (NearbyStations, 
 ```
 
 **Accuracy vs Performance Trade-off**:
-```
-Scenario: Gas station "Shell Downtown" changes hours
-──────────────────────────────────────────────────────────────────
-Time 0:00: Hours changed in database (7am-10pm → 6am-11pm)
-           Cache still shows old hours (7am-10pm)
 
-Time 0:15: User A queries nearby stations
-           ↓
-           Cache HIT ──▶ Returns old hours (7am-10pm)
-           User Experience: Sees incorrect hours ⚠️
-           (Acceptable: User might call or check on arrival)
-
-Time 0:30: Probabilistic refresh triggered (cache age + randomness)
-           ↓
-           Background refresh ──▶ Update to new hours (6am-11pm)
-
-Time 0:35: User B queries same location
-           ↓
-           Cache HIT ──▶ Returns correct hours (6am-11pm) ✅
-           User Experience: Accurate information
-
-Time 1:00+: All subsequent users see correct hours
-```
+| Time | Event |
+|------|-------|
+| T+0:00 | Hours changed in DB (7am–10pm → 6am–11pm); cache unchanged |
+| T+0:15 | User A queries — cache HIT, old hours returned ⚠️ |
+| T+0:30 | Probabilistic refresh triggers; background fetch updates cache |
+| T+0:35 | User B queries — cache HIT, correct hours ✅ |
+| T+1:00+ | All users see correct hours |
 
 **Statistical Correctness**:
-```
-Dataset: 10 gas stations returned per query
-Cache TTL: 1 hour
-Update frequency: 1 station updates hours per day
 
-Probability Analysis:
-─────────────────────────────────────────────────────────────
-Stations that update per hour: 1 ÷ 24 = 0.042 stations
-Chance of seeing outdated data: 0.042 ÷ 10 = 0.42%
-Accuracy: 99.58% ✅
+Dataset: 10 stations per query, TTL: 1 hour, ~1 station updates hours per day.
 
-Even if inaccurate:
-- Not safety-critical (users verify on arrival)
-- Self-corrects within 1 hour
-- Next query shows accurate data
-- Phone number always available for verification
-```
+- Stations updating per hour: 1 ÷ 24 ≈ 0.042
+- Chance of seeing outdated data per query: 0.042 ÷ 10 ≈ **0.42 %**
+- Accuracy: **99.58 %** ✅
+
+Even if inaccurate: not safety-critical, self-corrects within 1 hour.
 
 **Probabilistic Refresh Distribution**:
-```
-Without Probabilistic Refresh:
-────────────────────────────────────────────────────────────
-Time:    0:00        1:00         2:00         3:00
-         |           |            |            |
-Load:    ████        ████         ████         ████
-         ↑           ↑            ↑            ↑
-         All keys expire and refresh simultaneously
-         Thundering herd ❌
 
-With Probabilistic Refresh (Beta=1.5):
-────────────────────────────────────────────────────────────
-Time:    0:00    0:45  1:00  1:15   2:00       3:00
-         |        |    |     |      |          |
-Load:    ██      ██   ███   ██     ███        ██
-         ↑       ↑    ↑     ↑      ↑          ↑
-         Refreshes spread out based on access patterns
-         Smooth load distribution ✅
-
-Popular keys refresh earlier (higher probability)
-Less popular keys might wait until TTL expiry
-Database load stays consistent
+```mermaid
+xychart-beta
+    title "Refresh load over time"
+    x-axis [0:00, 0:45, 1:00, 1:15, 1:30, 2:00, 2:30, 3:00]
+    y-axis "Relative DB load" 0 --> 10
+    bar [0, 0, 10, 0, 0, 10, 0, 10]
+    line [0, 2, 3, 2, 1, 3, 1, 2]
 ```
+
+Without `HitRefreshProbabilistic`: all keys expire at the same TTL boundary, causing a thundering herd (spikes at 1:00, 2:00, 3:00). With `HitRefreshProbabilistic` (beta=1.5): refreshes are staggered — popular keys refresh earlier, load stays smooth.
 
 **Code with Probabilistic Refresh**:
 ```go
@@ -597,37 +469,16 @@ func GetBlogPost(w http.ResponseWriter, r *http.Request) {
 ```
 
 **Configuration Hierarchy Visualization**:
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Application-Level Config (global defaults)                  │
-│ • Redis connection                                          │
-│ • Global timeouts                                           │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Handler-Level Config (per data type)                        │
-│ ProductCache:                                               │
-│   • Prefix: "products"                                      │
-│   • TTL: 5 minutes                                          │
-│   • Policy: SyncWriteThenReturn      ← Sets default        │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Call-Level Config (per endpoint/use case)                   │
-│ GetFeaturedProducts():                                      │
-│   • Override Policy: StaleWhileRevalidate  ← Homepage speed │
-│   • Override TTL: 2 minutes                ← More frequent  │
-│                                                             │
-│ GetProductDetails():                                        │
-│   • Uses handler defaults                  ← Consistency   │
-└─────────────────────────────────────────────────────────────┘
 
-Developer Intent is Clear at Every Level ✅
-Code Review Surfaces Policy Decisions ✅
-Documentation Lives in Code ✅
+```mermaid
+flowchart TD
+    A["Option functions at New\n(global defaults: Redis addr, timeouts)"]
+    A --> B["handlerConfig\n• prefix: products\n• defaultTTL: 5 min\n• missFillPolicy: MissFillSync"]
+    B --> C1["GetFeaturedProducts()\nWithCallMissFillPolicy(StaleOrSync)\nWithTTL(2 min)"]
+    B --> C2["GetProductDetails()\nUses handler defaults"]
 ```
+
+Developer intent is clear at every level — policy decisions surface in code review.
 
 ## When to Look Elsewhere
 

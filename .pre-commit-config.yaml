@@ -16,9 +16,17 @@ repos:
       - id: go-vet
       - id: golangci-lint
       - id: go-imports
-      - id: validate-toml
 
   - repo: https://github.com/golangci/golangci-lint
     rev: v2.5.0
     hooks:
       - id: golangci-lint
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.11
+    hooks:
+      - id: ruff          # lint
+        args: [--fix]
+        files: ^python/
+      - id: ruff-format   # format
+        files: ^python/
