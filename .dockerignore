@@ -1,0 +1,68 @@
+# Git
+.git
+.gitignore
+
+# CI/CD
+.github
+
+# Documentation
+README.md
+CONTRIBUTING.md
+
+# Development files
+.vscode/settings.json
+.pre-commit-config.yaml
+setup-dev.sh
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Test and coverage files
+*.test
+*.out
+coverage.*
+*.prof
+*.pprof
+
+# IDE files
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Core dumps
+core
+core.*
+
+# Build artifacts
+dist/
+build/
+bin/
+
+# Compiled shared libraries (rebuilt inside the container)
+*.so
+*.dylib
+*.dll
+
+# CGo generated C header
+python/cashcov/libcashcov.h
+cshim/libcashcov.h
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/

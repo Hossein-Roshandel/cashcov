@@ -34,9 +34,6 @@ go.work
 *.swo
 *~
 
-# Docker
-.dockerignore
-
 # OS generated files
 
 # OS generated files
