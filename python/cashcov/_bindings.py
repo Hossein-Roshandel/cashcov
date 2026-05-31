@@ -9,6 +9,11 @@ import os
 import sys
 from pathlib import Path
 
+# libc for malloc — used by the generator callback to produce a C-owned string.
+_libc = ctypes.CDLL(None)
+_libc.malloc.restype = ctypes.c_void_p
+_libc.malloc.argtypes = [ctypes.c_size_t]
+
 # ---------------------------------------------------------------------------
 # Library discovery
 # ---------------------------------------------------------------------------
@@ -43,14 +48,15 @@ _lib = _find_library()
 # ---------------------------------------------------------------------------
 # Generator callback type
 # The Python callable passed to get_or_refresh is wrapped in this CFUNCTYPE.
-# The function receives the cache key and must return a bytes object containing
-# the JSON-encoded value, or None to signal an error.  The returned bytes are
-# copied into a malloc'd C string by the wrapper; Python retains ownership of
-# the bytes object itself.
+# The function receives the cache key and must return a malloc'd C string
+# (as a plain integer / c_void_p) containing the JSON-encoded value, or 0/None
+# to signal an error.  The C shim takes ownership and frees the returned pointer.
 # ---------------------------------------------------------------------------
 
 # typedef char* (*cashcov_generator_fn)(const char* key);
-GENERATOR_FN = ctypes.CFUNCTYPE(ctypes.c_char_p, ctypes.c_char_p)
+# Return type is c_void_p so ctypes does NOT do the bytes-copy conversion that
+# c_char_p would apply, allowing the callback to return a raw malloc'd address.
+GENERATOR_FN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_char_p)
 
 # ---------------------------------------------------------------------------
 # Function signatures
@@ -63,7 +69,9 @@ _lib.CashCov_NewHandler.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
 # char* CashCov_GetOrRefresh(int64_t handle, const char* key, cashcov_generator_fn gen,
 #                            int missFillPolicy, int hitRefreshPolicy, int errorPolicy);
 # Pass -1 for any policy to use the handler-level default.
-_lib.CashCov_GetOrRefresh.restype = ctypes.c_char_p
+# restype is c_void_p so we retain the raw pointer for CashCov_Free; c_char_p
+# would silently copy the bytes into a Python object and lose the address.
+_lib.CashCov_GetOrRefresh.restype = ctypes.c_void_p
 _lib.CashCov_GetOrRefresh.argtypes = [
     ctypes.c_int64,
     ctypes.c_char_p,
@@ -77,10 +85,17 @@ _lib.CashCov_GetOrRefresh.argtypes = [
 _lib.CashCov_Set.restype = ctypes.c_int
 _lib.CashCov_Set.argtypes = [ctypes.c_int64, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
 
+# void CashCov_SetGenerator(int64_t handle, cashcov_generator_fn gen);
+# Registers a persistent background generator for the handle.  Background goroutines
+# (hit-refresh, stale-rewrite) use this generator, not the per-call one.
+# Pass NULL to clear.
+_lib.CashCov_SetGenerator.restype = None
+_lib.CashCov_SetGenerator.argtypes = [ctypes.c_int64, GENERATOR_FN]
+
 # void CashCov_DestroyHandler(int64_t handle);
 _lib.CashCov_DestroyHandler.restype = None
 _lib.CashCov_DestroyHandler.argtypes = [ctypes.c_int64]
 
 # void CashCov_Free(char* ptr);
 _lib.CashCov_Free.restype = None
-_lib.CashCov_Free.argtypes = [ctypes.c_char_p]
+_lib.CashCov_Free.argtypes = [ctypes.c_void_p]

@@ -181,6 +181,7 @@ def demo_hit_refresh_ahead() -> None:
         ttl=30,
         hit_refresh_policy=HitRefreshPolicy.AHEAD,
         refresh_ahead_threshold=0.8,  # refresh immediately (threshold is very high)
+        generator=gen,  # required: background goroutine uses this
     ) as cache:
         # Prime the cache
         cache.set("item:5", json.dumps({"v": 1}), ttl=30)
@@ -207,6 +208,7 @@ def demo_hit_refresh_older_than() -> None:
         ttl=30,
         hit_refresh_policy=HitRefreshPolicy.OLDER_THAN,
         refresh_older_than=1,  # refresh entries older than 1 second
+        generator=gen,  # required: background goroutine uses this
     ) as cache:
         cache.set("item:6", json.dumps({"v": 1}), ttl=30)
         print("  Hit immediately after set — too new to refresh:")

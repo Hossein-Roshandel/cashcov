@@ -272,8 +272,12 @@ func (h *Handler[T]) missStaleWhileRevalidate(
 	defer cancel()
 
 	if staleResult, err := h.getFromKey(staleCtx, staleKey); err == nil {
-		// Found stale data, return it and refresh in background
-		go h.spawnStaleRefresh(key, ttl, gen)
+		// Found stale data, return it immediately.  Spawn the background rewrite
+		// only when background refresh is enabled (disableHitRefresh respects
+		// C/FFI callers that have not registered a persistent generator).
+		if !co.disableHitRefresh {
+			go h.spawnStaleRefresh(key, ttl, gen)
+		}
 		return Result[T]{Value: staleResult, FromCache: true, CachedAt: time.Now()}, nil
 	}
 

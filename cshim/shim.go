@@ -78,7 +78,12 @@ type shimHandlerConfig struct {
 var (
 	handleMu sync.RWMutex
 	handles  = map[int64]*cache.Handler[string]{}
-	seq      int64
+	// bgGenerators stores the handler-level background generator for each handle.
+	// The generator is set by CashCov_SetGenerator and used by background goroutines
+	// (hit-refresh, stale-rewrite).  Per-call generators passed to CashCov_GetOrRefresh
+	// are only used synchronously and never outlive the call.
+	bgGenerators = map[int64]C.cashcov_generator_fn{}
+	seq          int64
 )
 
 func storeHandle(h *cache.Handler[string]) int64 {
@@ -96,9 +101,17 @@ func loadHandle(id int64) (*cache.Handler[string], bool) {
 	return h, ok
 }
 
+func loadBgGenerator(id int64) (C.cashcov_generator_fn, bool) {
+	handleMu.RLock()
+	gen, ok := bgGenerators[id]
+	handleMu.RUnlock()
+	return gen, ok
+}
+
 func deleteHandle(id int64) {
 	handleMu.Lock()
 	delete(handles, id)
+	delete(bgGenerators, id)
 	handleMu.Unlock()
 }
 
@@ -144,6 +157,20 @@ func CashCov_NewHandler(redisAddr *C.char, configJSON *C.char) C.int64_t {
 		Addr: C.GoString(redisAddr),
 	})
 
+	// Validate policy enum ranges before passing raw integers to Go iota constants.
+	// MissFillPolicy:   0=Default 1=Sync 2=Async 3=StaleOrSync 4=FailFast 5=Cooperative
+	// HitRefreshPolicy: 0=Default 1=Ahead 2=Probabilistic 3=OlderThan 4=None
+	// ErrorPolicy:      0=Surface 1=ZeroValue
+	if cfg.MissFillPolicy < 0 || cfg.MissFillPolicy > 5 {
+		return -1
+	}
+	if cfg.HitRefreshPolicy < 0 || cfg.HitRefreshPolicy > 4 {
+		return -1
+	}
+	if cfg.ErrorPolicy < 0 || cfg.ErrorPolicy > 1 {
+		return -1
+	}
+
 	ttl := cfg.TTLSecs
 	if ttl <= 0 {
 		ttl = 300 // 5-minute fallback
@@ -185,9 +212,36 @@ func CashCov_NewHandler(redisAddr *C.char, configJSON *C.char) C.int64_t {
 	return C.int64_t(storeHandle(h))
 }
 
+// CashCov_SetGenerator registers a persistent generator callback for a handler.
+//
+// Background goroutines spawned by hit-refresh policies (HitRefreshAhead,
+// HitRefreshProbabilistic, HitRefreshOlderThan, HitRefreshDefault) and the
+// stale-rewrite goroutine in MissFillStaleOrSync use this registered generator,
+// not the per-call one.  This decouples the background goroutine lifetime from
+// the individual CashCov_GetOrRefresh call lifetime, which allows the registered
+// c_gen to be kept alive as long as the handler itself.
+//
+// Pass NULL to clear a previously registered generator.
+//
+//export CashCov_SetGenerator
+func CashCov_SetGenerator(handle C.int64_t, gen C.cashcov_generator_fn) {
+	handleMu.Lock()
+	if gen == nil {
+		delete(bgGenerators, int64(handle))
+	} else {
+		bgGenerators[int64(handle)] = gen
+	}
+	handleMu.Unlock()
+}
+
 // CashCov_GetOrRefresh looks up key in the cache. On a miss it invokes the
-// supplied generator callback to produce a fresh value, writes it to Redis,
-// and returns it. On a hit the cached value is returned directly.
+// supplied per-call generator callback synchronously to produce a fresh value.
+// On a hit the cached value is returned directly.
+//
+// Background goroutines triggered by hit-refresh policies use the generator
+// registered via CashCov_SetGenerator, NOT the per-call gen argument.  If no
+// background generator has been registered, background refresh is suppressed for
+// this call (equivalent to HitRefreshNone for the background path only).
 //
 // missFillPolicy, hitRefreshPolicy, errorPolicy are per-call policy overrides.
 // Pass -1 for any of them to use the handler's configured default.
@@ -195,7 +249,7 @@ func CashCov_NewHandler(redisAddr *C.char, configJSON *C.char) C.int64_t {
 // The returned pointer is a newly-allocated C string that the caller MUST
 // release with CashCov_Free. Returns NULL on error.
 //
-// The generator callback receives the cache key and must return a
+// The per-call generator callback receives the cache key and must return a
 // newly-allocated (malloc'd) C string with the JSON-encoded value, or NULL
 // to signal a generation failure. cashcov frees the returned string.
 //
@@ -218,18 +272,30 @@ func CashCov_GetOrRefresh(
 
 	goKey := C.GoString(key)
 
-	generator := func(_ context.Context) (string, error) {
+	// Per-call generator: used only for the synchronous miss-fill path.
+	// It is called within this function and never after it returns.
+	callGen := func(_ context.Context) (string, error) {
 		cResult := C.call_generator(gen, C.CString(goKey))
 		if cResult == nil {
 			return "", fmt.Errorf("generator returned nil for key %q", goKey)
 		}
-		// Copy into Go memory before freeing the C allocation.
 		goResult := C.GoString(cResult)
 		C.free(unsafe.Pointer(cResult))
 		return goResult, nil
 	}
 
+	// Background generator: used by hit-refresh and stale-rewrite goroutines
+	// that may execute after this function returns.  Only safe because it is
+	// registered on the handle (lifetime = handler lifetime in Python), not as
+	// a stack-local variable.
+	bgGen, hasBgGen := loadBgGenerator(int64(handle))
+
 	var callOpts []cache.CallOption
+	if !hasBgGen {
+		// No background generator registered: disable all background goroutines
+		// so we never call into a dangling function pointer.
+		callOpts = append(callOpts, cache.WithoutBackgroundRefresh())
+	}
 	if missFillPolicy >= 0 {
 		p := cache.MissFillPolicy(missFillPolicy)
 		callOpts = append(callOpts, cache.WithCallMissFillPolicy(p))
@@ -241,6 +307,28 @@ func CashCov_GetOrRefresh(
 	if errorPolicy >= 0 {
 		p := cache.ErrorPolicy(errorPolicy)
 		callOpts = append(callOpts, cache.WithCallErrorPolicy(p))
+	}
+
+	// Choose the generator to pass to GetOrRefresh.  On a miss the library
+	// always calls this synchronously; on a hit background goroutines also call
+	// it via spawnBackgroundRefresh / spawnStaleRefresh.  We use bgGen for the
+	// full call so that background goroutines get the registered (safe) pointer.
+	// If there is no background generator we already added WithoutBackgroundRefresh
+	// above, so background code paths will never be reached and callGen is safe.
+	var generator cache.Generator[string]
+	if hasBgGen {
+		bgGenCopy := bgGen // capture for closure
+		generator = func(_ context.Context) (string, error) {
+			cResult := C.call_generator(bgGenCopy, C.CString(goKey))
+			if cResult == nil {
+				return "", fmt.Errorf("generator returned nil for key %q", goKey)
+			}
+			goResult := C.GoString(cResult)
+			C.free(unsafe.Pointer(cResult))
+			return goResult, nil
+		}
+	} else {
+		generator = callGen
 	}
 
 	res, err := h.GetOrRefresh(context.Background(), goKey, generator, callOpts...)

@@ -94,6 +94,7 @@ CacheHandler(
     redis_addr: str = "localhost:6379",
     prefix: str = "",
     ttl: int = 300,
+    generator: Callable[[str], str] | None = None,
     miss_fill_policy: MissFillPolicy = MissFillPolicy.DEFAULT,
     hit_refresh_policy: HitRefreshPolicy = HitRefreshPolicy.DEFAULT,
     error_policy: ErrorPolicy = ErrorPolicy.SURFACE,
@@ -113,6 +114,7 @@ All `int` time parameters are in **seconds**.
 
 | Parameter | Policy | Description |
 |-----------|--------|-------------|
+| `generator` | hit-refresh / stale-rewrite | **Required for background refresh to work.** See below. |
 | `stale_ttl` | `STALE_OR_SYNC` | How long to keep a stale copy (seconds) |
 | `refresh_cooldown` | `DEFAULT` | Minimum gap between background refreshes |
 | `dedup_window` | any miss | Suppress duplicate generation for this many seconds after a write |
@@ -124,6 +126,13 @@ All `int` time parameters are in **seconds**.
 ### `handler.get_or_refresh(key, generator, *, miss_fill_policy=None, hit_refresh_policy=None, error_policy=None) -> str | None`
 
 Return the cached JSON string for `key`. Calls `generator(key)` on a miss.
+
+The `generator` argument here is used **only for the synchronous miss-fill
+path** (the call itself). Background goroutines spawned by hit-refresh
+policies and `MissFillStaleOrSync`'s stale-rewrite path use the
+**handler-level** `generator=` registered at construction time. If no
+handler-level generator is registered those goroutines are suppressed
+automatically.
 
 Per-call `miss_fill_policy`, `hit_refresh_policy`, and `error_policy` override the handler defaults for this call only. Pass `None` (default) to use the handler default.
 
@@ -156,6 +165,46 @@ python python/examples/basic.py
 python python/examples/policies.py
 ```
 
+## Background refresh
+
+The following policies spawn **background goroutines** that invoke the
+generator after `get_or_refresh` has already returned:
+
+- `HitRefreshPolicy.DEFAULT`, `AHEAD`, `PROBABILISTIC`, `OLDER_THAN`
+- `MissFillPolicy.STALE_OR_SYNC` (stale-path rewrite)
+
+Because these goroutines run on Go's scheduler independently of Python's
+event loop, they cannot safely call a per-call Python function after that
+call has returned. To use these policies, pass a **handler-level generator**
+at construction time via `generator=`. Its lifetime is tied to the handler
+object, so the goroutines always have a valid function pointer:
+
+```python
+from cashcov import CacheHandler
+from cashcov.policies import HitRefreshPolicy
+
+def compute(key: str) -> str:
+    return fetch_from_db(key)
+
+cache = CacheHandler(
+    redis_addr="localhost:6379",
+    prefix="prices",
+    ttl=60,
+    hit_refresh_policy=HitRefreshPolicy.AHEAD,
+    refresh_ahead_threshold=0.2,
+    generator=compute,          # <-- required for background refresh
+)
+
+# The per-call generator is used on a miss (synchronous path only).
+# The handler-level generator= is used by background goroutines.
+result = cache.get_or_refresh("product:42", compute)
+```
+
+If `generator=` is omitted, `HitRefreshPolicy` values other than `NONE`
+are accepted but their background goroutines are silently suppressed —
+the cache still works correctly for miss-fill, it just never proactively
+refreshes on hits.
+
 ## Policy examples
 
 ### MissFillAsync with deduplication
@@ -178,12 +227,16 @@ cache = CacheHandler(
 ```python
 from cashcov.policies import HitRefreshPolicy
 
+def compute(key: str) -> str:
+    return fetch_from_db(key)
+
 cache = CacheHandler(
     redis_addr="localhost:6379",
     prefix="prices",
     ttl=60,
     hit_refresh_policy=HitRefreshPolicy.AHEAD,
     refresh_ahead_threshold=0.2,  # refresh when < 20% TTL remaining
+    generator=compute,            # required: used by background goroutine
 )
 ```
 
