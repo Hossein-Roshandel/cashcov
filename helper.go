@@ -195,7 +195,7 @@ func (h *Handler[T]) shouldRefreshNow(fullKey string) bool {
 // Parameters:
 //   - fullKey: The full cache key (including prefix) to update.
 func (h *Handler[T]) setLastRefreshNow(fullKey string) {
-	if h.config.refreshCooldown <= 0 {
+	if h.config.refreshCooldown <= 0 && h.config.missDeduplicationWindow <= 0 {
 		return
 	}
 	h.lastRefreshMu.Lock()
@@ -206,6 +206,36 @@ func (h *Handler[T]) setLastRefreshNow(fullKey string) {
 // ---------------------------
 // New Miss Policy Handlers
 // ---------------------------
+
+// checkDeduplicationBypass checks whether this process wrote the given key recently
+// enough that the caller can skip generation and just re-read from Redis.
+//
+// If the missDeduplicationWindow is > 0 and this process recorded a write for the key
+// within the effective window (clamped to ttl), it attempts a Redis GET. On success it
+// returns the cached result and true; otherwise it returns false and the caller should
+// proceed to the fill policy.
+func (h *Handler[T]) checkDeduplicationBypass(ctx context.Context, key string, ttl time.Duration) (Result[T], bool) {
+	if h.config.missDeduplicationWindow <= 0 {
+		return Result[T]{}, false
+	}
+	window := h.config.missDeduplicationWindow
+	if window > ttl {
+		window = ttl
+	}
+	fullKey := h.fullKey(key)
+	h.lastRefreshMu.Lock()
+	last, ok := h.lastRefreshByKey[fullKey]
+	h.lastRefreshMu.Unlock()
+	if !ok || time.Since(last) >= window {
+		return Result[T]{}, false
+	}
+	res, err := h.Get(ctx, key)
+	if err == nil {
+		return res, true
+	}
+	// Key not in Redis despite recent write — caller should proceed with fill policy.
+	return Result[T]{}, false
+}
 
 // missStaleWhileRevalidate handles a cache miss by checking for stale data and returning it,
 // while refreshing the main cache in the background. If no stale data is found, it falls back
@@ -251,57 +281,11 @@ func (h *Handler[T]) missStaleWhileRevalidate(
 	return h.missSyncWriteThenReturn(ctx, key, ttl, gen)
 }
 
-// missFailFast handles a cache miss by immediately returning an error without attempting generation.
-// It returns a zero-valued Result with ErrCacheMissFailFast, suitable for policies requiring fast failure.
-//
-// Parameters:
-//   - ctx: Context (unused, provided for consistency).
-//   - key: Cache key (unused, provided for consistency).
-//
-// Returns:
-//   - Result[T]: A zero-valued Result with FromCache set to false.
-//   - error: Always returns ErrCacheMissFailFast.
+// missFailFast handles a cache miss by immediately returning ErrCacheMiss without
+// calling the generator. Suitable for circuit-breaker and explicit-fallback patterns.
 func (h *Handler[T]) missFailFast(_ context.Context, _ string) (Result[T], error) {
 	var zero T
-	return Result[T]{Value: zero, FromCache: false}, ErrCacheMissFailFast
-}
-
-// missRefreshAhead handles a cache miss by performing synchronous generation and scheduling a proactive
-// refresh for future cache hits. It uses missSyncWriteThenReturn for the initial miss and schedules a
-// background refresh via scheduleRefreshAhead based on the provided refreshAheadThreshold (defaulting to
-// the configured defaultRefreshAheadThreshold if zero or negative).
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts.
-//   - key: Cache key to check and store the value.
-//   - ttl: Time-to-live duration for the cached value.
-//   - gen: Generator function to produce the value on cache miss.
-//   - co: Call options, including refreshAheadThreshold.
-//
-// Returns:
-//   - Result[T]: The result from synchronous generation.
-//   - error: Any error from synchronous generation.
-func (h *Handler[T]) missRefreshAhead(
-	ctx context.Context,
-	key string,
-	ttl time.Duration,
-	gen Generator[T],
-	co callOpts,
-) (Result[T], error) {
-	// On actual miss, behave like sync write
-	result, err := h.missSyncWriteThenReturn(ctx, key, ttl, gen)
-	if err != nil {
-		return result, err
-	}
-
-	// Schedule refresh-ahead for future hits
-	threshold := co.refreshAheadThreshold
-	if threshold <= 0 {
-		threshold = h.config.defaultRefreshAheadThreshold
-	}
-
-	go h.scheduleRefreshAhead(key, ttl, gen, threshold)
-	return result, nil
+	return Result[T]{Value: zero, FromCache: false}, ErrCacheMiss
 }
 
 // missCooperativeRefresh handles a cache miss by allowing concurrent requests to wait for the first
@@ -352,92 +336,6 @@ func (h *Handler[T]) missCooperativeRefresh(
 		// Got lock, proceed with normal sync generation
 		return h.missSyncWriteThenReturn(ctx, key, ttl, gen)
 	}
-}
-
-// missBestEffort handles a cache miss by attempting to generate a value and returning it,
-// ignoring any cache write failures. On generation error, it returns a zero-valued Result
-// with no error. Cache write errors are ignored by design, ensuring the generated value is
-// returned regardless of caching success.
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts.
-//   - key: Cache key to store the value.
-//   - ttl: Time-to-live duration for the cached value.
-//   - gen: Generator function to produce the value on cache miss.
-//
-// Returns:
-//   - Result[T]: The result containing the generated value or a zero value on generation error.
-//   - error: Always nil, as errors are ignored by design.
-func (h *Handler[T]) missBestEffort(
-	ctx context.Context,
-	key string,
-	ttl time.Duration,
-	gen Generator[T],
-) (Result[T], error) {
-	var zero T
-	var err error
-	var v T
-
-	v, err = gen(ctx)
-	//nolint:nilerr // Cache write failure is ignored by design, return generated value
-	if err != nil {
-		return Result[T]{
-			Value:     zero,
-			FromCache: false,
-			CachedAt:  time.Now(),
-		}, nil
-	}
-
-	// Successfully generated, write to cache
-	//nolint:nilerr // Cache write failure is ignored by design, return generated value
-	if setErr := h.Set(ctx, key, v, WithTTL(ttl)); setErr != nil {
-		return Result[T]{
-			Value:     v,
-			FromCache: false,
-			CachedAt:  time.Now(),
-		}, nil
-	}
-
-	return Result[T]{Value: v, FromCache: false, CachedAt: time.Now()}, nil
-}
-
-// missProbabilisticRefresh handles a cache miss by performing synchronous generation and
-// enabling probabilistic refresh for future cache hits. It uses missSyncWriteThenReturn for
-// the initial miss and sets up probabilistic refresh metadata via enableProbabilisticRefresh,
-// using the provided probabilisticRefreshBeta (defaulting to defaultProbabilisticBeta if zero
-// or negative).
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts.
-//   - key: Cache key to check and store the value.
-//   - ttl: Time-to-live duration for the cached value.
-//   - gen: Generator function to produce the value on cache miss.
-//   - co: Call options, including probabilisticRefreshBeta.
-//
-// Returns:
-//   - Result[T]: The result from synchronous generation.
-//   - error: Any error from synchronous generation.
-func (h *Handler[T]) missProbabilisticRefresh(
-	ctx context.Context,
-	key string,
-	ttl time.Duration,
-	gen Generator[T],
-	co callOpts,
-) (Result[T], error) {
-	// For actual miss, use sync generation
-	result, err := h.missSyncWriteThenReturn(ctx, key, ttl, gen)
-	if err != nil {
-		return result, err
-	}
-
-	// Set up probabilistic refresh for future hits
-	beta := co.probabilisticRefreshBeta
-	if beta <= 0 {
-		beta = h.config.defaultProbabilisticBeta
-	}
-
-	go h.enableProbabilisticRefresh(key, ttl, gen, beta)
-	return result, nil
 }
 
 // ---------------------------
@@ -533,66 +431,6 @@ func (h *Handler[T]) setToKey(ctx context.Context, fullKey string, value T, ttl 
 	return h.config.rdb.Set(ctx, fullKey, b, ttl).Err()
 }
 
-// scheduleRefreshAhead schedules a proactive refresh for a cache key after a delay.
-// It sleeps for a duration based on the TTL and refresh threshold, then checks if the
-// key still exists in Redis. If it does, it triggers a background refresh via
-// spawnBackgroundRefresh. The operation respects the background refresh timeout
-// (bgRefreshTimeout). Errors are ignored to ensure non-blocking behavior.
-//
-// Parameters:
-//   - key: Cache key to refresh.
-//   - ttl: Time-to-live duration of the cache entry.
-//   - gen: Generator function to produce the new value.
-//   - threshold: Fraction of TTL remaining to trigger refresh (e.g., 0.2 for 20%).
-func (h *Handler[T]) scheduleRefreshAhead(key string, ttl time.Duration, gen Generator[T], threshold float64) {
-	refreshTime := time.Duration(float64(ttl) * (1.0 - threshold))
-	time.Sleep(refreshTime)
-
-	// Check if key still exists and refresh if needed
-	ctx, cancel := context.WithTimeout(context.Background(), h.config.bgRefreshTimeout)
-	defer cancel()
-
-	fullKey := h.fullKey(key)
-	exists, err := h.config.rdb.Exists(ctx, fullKey).Result()
-	if err != nil || exists == 0 {
-		return
-	}
-
-	h.spawnBackgroundRefresh(key, ttl, gen)
-}
-
-// enableProbabilisticRefresh initializes metadata for probabilistic refresh.
-// It stores the creation time of the cache key in lastRefreshByKey, enabling
-// future probabilistic refresh checks via shouldProbabilisticRefresh. This is a
-// no-op for the actual refresh logic, which is handled on cache hits.
-//
-// Parameters:
-//   - key: Cache key to track.
-//   - ttl: Time-to-live duration (unused, provided for consistency).
-//   - gen: Generator function (unused, provided for consistency).
-//   - beta: Probabilistic refresh factor (unused, provided for consistency).// enableProbabilisticRefresh initializes metadata for probabilistic refresh.
-//
-// It stores the creation time of the cache key in lastRefreshByKey, enabling
-// future probabilistic refresh checks via shouldProbabilisticRefresh. This is a
-// no-op for the actual refresh logic, which is handled on cache hits.
-//
-// Parameters:
-//   - key: Cache key to track.
-//   - ttl: Time-to-live duration (unused, provided for consistency).
-//   - gen: Generator function (unused, provided for consistency).
-//   - beta: Probabilistic refresh factor (unused, provided for consistency).
-func (h *Handler[T]) enableProbabilisticRefresh(key string, _ time.Duration, _ Generator[T], _ float64) {
-	// This would typically be implemented with a background worker
-	// For now, it sets up the framework for probabilistic refresh
-	// The actual probabilistic logic would be checked on cache hits
-
-	// Store metadata for probabilistic calculation
-	fullKey := h.fullKey(key)
-	h.lastRefreshMu.Lock()
-	h.lastRefreshByKey[fullKey+"@created"] = time.Now()
-	h.lastRefreshMu.Unlock()
-}
-
 // shouldProbabilisticRefresh determines if a cache key should be refreshed based on a
 // probabilistic formula. It calculates the key’s age relative to its TTL and applies a
 // probabilistic factor (beta) to decide if a refresh is needed. Returns true if a random
@@ -624,35 +462,28 @@ func (h *Handler[T]) shouldProbabilisticRefresh(key string, ttl time.Duration, b
 	return rand.Float64() < probability //nolint:gosec // This is not a security case, and a pseudo random is good enough
 }
 
-// handleHitRefresh manages refresh strategies for cache hits based on the miss policy.
-// It triggers background refreshes for supported policies, respecting thresholds and
-// cooldowns. The supported policies are:
-//   - MissPolicyRefreshAhead: Refreshes if the remaining TTL is below the threshold.
-//   - MissPolicyProbabilisticRefresh: Refreshes based on a probabilistic formula.
-//   - Other policies (SyncWriteThenReturn, ReturnThenAsyncWrite, StaleWhileRevalidate,
-//     FailFast, CooperativeRefresh, BestEffort): Perform standard background refresh
-//     if the cooldown allows.
+// handleHitRefresh manages background refresh behaviour for cache hits based on
+// the configured HitRefreshPolicy. It is called after a successful cache read.
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts.
 //   - key: Cache key to refresh.
 //   - ttl: Time-to-live duration for the updated value.
 //   - gen: Generator function to produce the new value.
-//   - missPolicy: The cache miss policy determining the refresh strategy.
+//   - hitRefresh: The HitRefreshPolicy determining the refresh strategy.
 //   - co: Call options, including refreshAheadThreshold and probabilisticRefreshBeta.
 func (h *Handler[T]) handleHitRefresh(
 	ctx context.Context,
 	key string,
 	ttl time.Duration,
 	gen Generator[T],
-	missPolicy MissPolicy,
+	hitRefresh HitRefreshPolicy,
 	co callOpts,
 ) {
 	fullKey := h.fullKey(key)
 
-	//nolint:exhaustive // Default case handles standard background refresh for unlisted policies
-	switch missPolicy {
-	case MissPolicyRefreshAhead:
+	switch hitRefresh { //nolint:exhaustive // HitRefreshDefault is handled by default:
+	case HitRefreshAhead:
 		threshold := co.refreshAheadThreshold
 		if threshold <= 0 {
 			threshold = h.config.defaultRefreshAheadThreshold
@@ -661,7 +492,7 @@ func (h *Handler[T]) handleHitRefresh(
 			go h.spawnBackgroundRefresh(key, ttl, gen)
 		}
 
-	case MissPolicyProbabilisticRefresh:
+	case HitRefreshProbabilistic:
 		beta := co.probabilisticRefreshBeta
 		if beta <= 0 {
 			beta = h.config.defaultProbabilisticBeta
@@ -670,19 +501,48 @@ func (h *Handler[T]) handleHitRefresh(
 			go h.spawnBackgroundRefresh(key, ttl, gen)
 		}
 
-	default:
-		// Standard background refresh
-		// MissPolicySyncWriteThenReturn
-		// MissPolicyReturnThenAsyncWrite
-		// MissPolicyStaleWhileRevalidate
-		// MissPolicyFailFast
-		// MissPolicyCooperativeRefresh
-		// MissPolicyBestEffort
+	case HitRefreshOlderThan:
+		age := co.refreshOlderThanAge
+		if age <= 0 {
+			age = h.config.defaultRefreshOlderThanAge
+		}
+		if age > 0 && h.shouldRefreshOlderThan(ctx, fullKey, ttl, age) {
+			go h.spawnBackgroundRefresh(key, ttl, gen)
+		}
 
+	case HitRefreshNone:
+		// Background refresh explicitly disabled.
+
+	default: // HitRefreshDefault
 		if h.shouldRefreshNow(fullKey) {
 			go h.spawnBackgroundRefresh(key, ttl, gen)
 		}
 	}
+}
+
+// shouldRefreshOlderThan returns true when the cached entry is older than the given
+// threshold. Age is estimated as originalTTL minus the remaining Redis TTL. If Redis
+// reports no TTL (key missing or persistent), the check returns false.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts.
+//   - fullKey: The full Redis key (including prefix) to check.
+//   - originalTTL: The TTL the entry was written with.
+//   - threshold: Minimum age to trigger a refresh.
+//
+// Returns:
+//   - bool: True if the entry age exceeds the threshold.
+func (h *Handler[T]) shouldRefreshOlderThan(
+	ctx context.Context,
+	fullKey string,
+	originalTTL, threshold time.Duration,
+) bool {
+	remaining, err := h.config.rdb.TTL(ctx, fullKey).Result()
+	if err != nil || remaining <= 0 {
+		return false
+	}
+	age := originalTTL - remaining
+	return age >= threshold
 }
 
 // shouldRefreshAhead checks if a proactive refresh should be triggered based on the

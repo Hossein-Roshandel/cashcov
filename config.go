@@ -35,11 +35,15 @@ type handlerConfig struct {
 	defaultTTL                   time.Duration
 	bgRefreshTimeout             time.Duration
 	refreshCooldown              time.Duration // Min gap between background refreshes for the same key after HIT
-	defaultMissPolicy            MissPolicy
+	defaultMissFillPolicy        MissFillPolicy
+	defaultHitRefreshPolicy      HitRefreshPolicy
+	defaultErrorPolicy           ErrorPolicy
 	staleDataTTL                 time.Duration // How long to keep stale data for SWR policy
 	defaultRefreshAheadThreshold float64       // Default threshold for refresh-ahead policy (0.2 = 20%)
 	defaultProbabilisticBeta     float64       // Default beta for probabilistic refresh (1.0)
+	defaultRefreshOlderThanAge   time.Duration // Minimum entry age to trigger HitRefreshOlderThan
 	cooperativeTimeout           time.Duration // Max time to wait for cooperative refresh
+	missDeduplicationWindow      time.Duration // If > 0, suppress generation if this process wrote the key within this window
 }
 
 // parseEnvDuration parses an environment variable as a float64 and converts it to a time.Duration with the given unit.
@@ -169,7 +173,7 @@ func loadHandlerConfig(rdb *redis.Client) (*handlerConfig, error) {
 		defaultTTL:                   defaultTTL,
 		bgRefreshTimeout:             bgRefreshTimeout,
 		refreshCooldown:              refreshCooldown,
-		defaultMissPolicy:            MissPolicySyncWriteThenReturn,
+		defaultMissFillPolicy:        MissFillDefault,
 		staleDataTTL:                 staleDataTTL,
 		defaultRefreshAheadThreshold: refreshAheadThreshold,
 		defaultProbabilisticBeta:     defaultProbabilisticBeta,

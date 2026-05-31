@@ -12,7 +12,7 @@ Cashcov is a Redis-backed caching wrapper designed for Go services that need mor
 
 **Scenario**: You have data cached with a 30-minute TTL, but the underlying data might change at any time. You want to detect and serve fresh data quickly without waiting for the TTL to expire.
 
-**How Cashcov Helps**: Use `MissPolicyRefreshAhead` or background refresh to proactively update cached values. Per-key locking ensures only one generator runs per key, avoiding duplicate database queries.
+**How Cashcov Helps**: Use `HitRefreshAhead (use WithDefaultHitRefreshPolicy)` or background refresh to proactively update cached values. Per-key locking ensures only one generator runs per key, avoiding duplicate database queries.
 
 ```go
 type Product struct {
@@ -28,7 +28,7 @@ productCache := cache.New[Product](rdb,
     cache.WithDefaultTTL(30*time.Minute),
     cache.WithRefreshAheadThreshold(0.2), // Refresh when 20% TTL remains (6 min)
     cache.WithRefreshCooldown(1*time.Minute),
-    cache.WithMissPolicy(cache.MissPolicyRefreshAhead),
+    cache.WithMissFillPolicy(cache.HitRefreshAhead (use WithDefaultHitRefreshPolicy)),
 )
 
 // Generator function that fetches from database
@@ -58,7 +58,7 @@ Cache:    [MISS]────────[HIT]───────────�
 Action:   Fetch DB      Serve cache       Serve cache      Fetch DB
           Write cache                     + Background     Write cache
                                           refresh
-          
+
 TTL:      [████████████████████████████████████████████████]
                                           ↑
                                     Refresh triggered at 20% remaining
@@ -85,7 +85,7 @@ func generateTrendingReport(ctx context.Context) (TrendingReport, error) {
 reportCache := cache.New[TrendingReport](rdb,
     cache.WithPrefix("trending"),
     cache.WithDefaultTTL(5*time.Minute),
-    cache.WithMissPolicy(cache.MissPolicySyncWriteThenReturn), // Strong consistency
+    cache.WithMissFillPolicy(cache.MissFillSync), // Strong consistency
 )
 
 // Scenario: 100 requests arrive simultaneously for the same report
@@ -121,15 +121,15 @@ for i := 0; i < 100; i++ {
     wg.Add(1)
     go func(reqID int) {
         defer wg.Done()
-        
-        result, err := reportCache.GetOrRefresh(ctx, "daily-trending", 
+
+        result, err := reportCache.GetOrRefresh(ctx, "daily-trending",
             generateTrendingReport)
-        
+
         if err != nil {
             log.Printf("Request %d failed: %v", reqID, err)
             return
         }
-        
+
         log.Printf("Request %d completed: FromCache=%v", reqID, result.FromCache)
         // First request: FromCache=false (generated)
         // Other 99: FromCache=true (shared from first)
@@ -145,7 +145,7 @@ elapsed := time.Since(start)
 
 **Scenario**: E-commerce inventory display where users can refresh the page to see updated stock. Initial load must be fast (<100ms), but showing slightly outdated inventory is acceptable since users will refresh or proceed to checkout where real-time validation occurs.
 
-**How Cashcov Helps**: `MissPolicyStaleWhileRevalidate` or `MissPolicyReturnThenAsyncWrite` return immediately and update in the background.
+**How Cashcov Helps**: `MissFillStaleOrSync` or `MissFillAsync` return immediately and update in the background.
 
 ```go
 type InventoryStatus struct {
@@ -159,23 +159,23 @@ inventoryCache := cache.New[InventoryStatus](rdb,
     cache.WithPrefix("inventory"),
     cache.WithDefaultTTL(2*time.Minute),
     cache.WithStaleDataTTL(1*time.Hour), // Keep stale data for fallback
-    cache.WithMissPolicy(cache.MissPolicyStaleWhileRevalidate),
+    cache.WithMissFillPolicy(cache.MissFillStaleOrSync),
 )
 
 // API endpoint for product page
 func GetInventoryHandler(w http.ResponseWriter, r *http.Request) {
     productID := r.URL.Query().Get("product_id")
-    
-    result, err := inventoryCache.GetOrRefresh(r.Context(), productID, 
+
+    result, err := inventoryCache.GetOrRefresh(r.Context(), productID,
         func(ctx context.Context) (InventoryStatus, error) {
             return warehouseAPI.CheckStock(ctx, productID) // 500ms API call
         })
-    
+
     if err != nil {
         http.Error(w, "Failed to fetch inventory", http.StatusInternalServerError)
         return
     }
-    
+
     // Response time: <10ms if cached, even if data is being refreshed
     json.NewEncoder(w).Encode(result.Value)
 }
@@ -252,7 +252,7 @@ dashboardCache := cache.New[PayrollDashboard](rdb,
     cache.WithDefaultTTL(30*24*time.Hour), // 30 days
     cache.WithBackgroundRefreshTimeout(30*time.Second),
     cache.WithRefreshCooldown(5*time.Minute),
-    cache.WithMissPolicy(cache.MissPolicySyncWriteThenReturn),
+    cache.WithMissFillPolicy(cache.MissFillSync),
 )
 
 func generateDashboard(ctx context.Context, month string) (PayrollDashboard, error) {
@@ -263,14 +263,14 @@ func generateDashboard(ctx context.Context, month string) (PayrollDashboard, err
 // Manager views dashboard
 func DashboardHandler(w http.ResponseWriter, r *http.Request) {
     month := r.URL.Query().Get("month") // e.g., "2025-10"
-    
-    result, err := dashboardCache.GetOrRefresh(r.Context(), month, 
+
+    result, err := dashboardCache.GetOrRefresh(r.Context(), month,
         func(ctx context.Context) (PayrollDashboard, error) {
             return generateDashboard(ctx, month)
         },
         cache.WithTTL(30*24*time.Hour),
     )
-    
+
     json.NewEncoder(w).Encode(result.Value)
 }
 ```
@@ -371,14 +371,14 @@ stationCache := cache.New[NearbyStations](rdb,
     cache.WithPrefix("gas-stations"),
     cache.WithDefaultTTL(1*time.Hour),
     cache.WithProbabilisticBeta(1.5), // Earlier refresh for popular locations
-    cache.WithMissPolicy(cache.MissPolicyProbabilisticRefresh),
+    cache.WithMissFillPolicy(cache.HitRefreshProbabilistic (use WithDefaultHitRefreshPolicy)),
 )
 
 // Find stations near user location
 func FindNearbyStations(ctx context.Context, lat, lon float64) (NearbyStations, error) {
     // Round to ~1km grid for cache efficiency
     gridKey := fmt.Sprintf("%.2f,%.2f", lat, lon)
-    
+
     return stationCache.GetOrRefresh(ctx, gridKey,
         func(ctx context.Context) (NearbyStations, error) {
             return db.QueryNearbyStations(ctx, lat, lon, 10) // Top 10
@@ -483,7 +483,7 @@ package cache
 var ProductCache = cache.New[Product](rdb,
     cache.WithPrefix("products"),
     cache.WithDefaultTTL(5*time.Minute),
-    cache.WithMissPolicy(cache.MissPolicySyncWriteThenReturn), // ← Explicit policy
+    cache.WithMissFillPolicy(cache.MissFillSync), // ← Explicit policy
     cache.WithRefreshCooldown(30*time.Second),
 )
 
@@ -492,14 +492,14 @@ var BlogCache = cache.New[BlogPost](rdb,
     cache.WithPrefix("blog"),
     cache.WithDefaultTTL(15*time.Minute),
     cache.WithStaleDataTTL(24*time.Hour),
-    cache.WithMissPolicy(cache.MissPolicyStaleWhileRevalidate), // ← Different policy
+    cache.WithMissFillPolicy(cache.MissFillStaleOrSync), // ← Different policy
 )
 
 // Time-sensitive: Flash sale inventory
 var FlashSaleCache = cache.New[SaleInventory](rdb,
     cache.WithPrefix("flash-sale"),
     cache.WithDefaultTTL(30*time.Second), // Short TTL
-    cache.WithMissPolicy(cache.MissPolicyFailFast), // ← Fail fast, handle explicitly
+    cache.WithMissFillPolicy(cache.MissFillFailFast), // ← Fail fast, handle explicitly
 )
 ```
 
@@ -510,13 +510,13 @@ var FlashSaleCache = cache.New[SaleInventory](rdb,
 + analyticsCache := cache.New[AnalyticsReport](rdb,
 +     cache.WithPrefix("analytics"),
 +     cache.WithDefaultTTL(1*time.Hour),
-+     cache.WithMissPolicy(cache.MissPolicyReturnThenAsyncWrite), // ← Reviewer can question
++     cache.WithMissFillPolicy(cache.MissFillAsync), // ← Reviewer can question
 + )
 
 Reviewer Comment:
 "Why ReturnThenAsyncWrite? Analytics reports are expensive to generate.
 If we have a cache stampede, we'll hit the DB multiple times.
-Consider MissPolicyCooperativeRefresh or MissPolicySyncWriteThenReturn."
+Consider MissFillCooperative or MissFillSync."
 
 Developer Response:
 "Good catch! Changed to CooperativeRefresh. The 2-second wait is
@@ -526,7 +526,7 @@ acceptable, and it prevents duplicate 10-second DB queries."
 +     cache.WithPrefix("analytics"),
 +     cache.WithDefaultTTL(1*time.Hour),
 +     cache.WithCooperativeTimeout(5*time.Second),
-+     cache.WithMissPolicy(cache.MissPolicyCooperativeRefresh), // ← Better choice
++     cache.WithMissFillPolicy(cache.MissFillCooperative), // ← Better choice
 + )
 ```
 
@@ -535,18 +535,18 @@ acceptable, and it prevents duplicate 10-second DB queries."
 // Default: Products use sync policy
 func GetProduct(ctx context.Context, id string) (Product, error) {
     return ProductCache.GetOrRefresh(ctx, id, productGenerator)
-    // Uses handler default: MissPolicySyncWriteThenReturn
+    // Uses handler default: MissFillSync
 }
 
 // Special case: Homepage featured products can be slightly stale for speed
 func GetFeaturedProducts(ctx context.Context) ([]Product, error) {
     ids := []string{"featured-1", "featured-2", "featured-3"}
     products := make([]Product, 0, len(ids))
-    
+
     for _, id := range ids {
         product, err := ProductCache.GetOrRefresh(ctx, id, productGenerator,
             // Override policy for homepage performance
-            cache.WithCallMissPolicy(cache.MissPolicyStaleWhileRevalidate), // ← Explicit override
+            cache.WithCallMissFillPolicy(cache.MissFillStaleOrSync), // ← Explicit override
             cache.WithTTL(2*time.Minute), // ← Shorter TTL for featured items
         )
         if err != nil {
@@ -554,7 +554,7 @@ func GetFeaturedProducts(ctx context.Context) ([]Product, error) {
         }
         products = append(products, product.Value)
     }
-    
+
     return products, nil
 }
 ```
@@ -564,14 +564,14 @@ func GetFeaturedProducts(ctx context.Context) ([]Product, error) {
 // pkg/handlers/products.go
 
 // GetProductDetails retrieves product information with strong consistency.
-// Policy: MissPolicySyncWriteThenReturn
+// Policy: MissFillSync
 //   - Ensures price consistency across all users
 //   - Prevents cache stampede with per-key locking
 //   - Acceptable latency: First miss takes ~500ms (DB query)
 //   - Subsequent hits: <10ms
 func GetProductDetails(w http.ResponseWriter, r *http.Request) {
     productID := mux.Vars(r)["id"]
-    
+
     result, err := ProductCache.GetOrRefresh(r.Context(), productID,
         func(ctx context.Context) (Product, error) {
             return db.FetchProduct(ctx, productID)
@@ -580,14 +580,14 @@ func GetProductDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetBlogPost retrieves blog content with stale-while-revalidate.
-// Policy: MissPolicyStaleWhileRevalidate
+// Policy: MissFillStaleOrSync
 //   - Prioritizes fast page load (<50ms)
 //   - Accepts showing slightly outdated content
 //   - Background refresh keeps content reasonably fresh
 //   - Not suitable for: Breaking news, time-sensitive content
 func GetBlogPost(w http.ResponseWriter, r *http.Request) {
     slug := mux.Vars(r)["slug"]
-    
+
     result, err := BlogCache.GetOrRefresh(r.Context(), slug,
         func(ctx context.Context) (BlogPost, error) {
             return cms.FetchBlogPost(ctx, slug)
@@ -698,13 +698,13 @@ Distributed locking is on the roadmap.
 
 ## Decision Checklist
 
-✅ Does the caller tolerate bounded staleness? → **Use Cashcov**  
-✅ Are upstream calls slow/expensive? → **Use Cashcov**  
-✅ Need explicit policies in code? → **Use Cashcov**  
-✅ Need background refresh or SWR? → **Use Cashcov**  
+✅ Does the caller tolerate bounded staleness? → **Use Cashcov**
+✅ Are upstream calls slow/expensive? → **Use Cashcov**
+✅ Need explicit policies in code? → **Use Cashcov**
+✅ Need background refresh or SWR? → **Use Cashcov**
 
-❌ Need 100% accuracy always? → **Skip caching**  
-❌ Source already <10ms? → **Skip caching**  
+❌ Need 100% accuracy always? → **Skip caching**
+❌ Source already <10ms? → **Skip caching**
 ❌ Need distributed locks today? → **Wait for roadmap or use alternatives**
 
 Cashcov balances freshness and performance with clear, policy-driven behavior. Use it where those trade-offs match your product requirements, and keep critical paths on direct reads.

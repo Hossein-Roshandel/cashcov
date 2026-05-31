@@ -33,8 +33,8 @@ A high-performance, type-safe Redis caching library for Go with advanced feature
 ## �🚀 Features
 
 - **Type Safety**: Leverages Go 1.18+ generics for compile-time type safety
-- **Flexible Miss Policies**: Choose between sync and async cache miss handling
-- **Background Refresh**: Automatically refresh cached data in the background reduce data staleness and use mutex to prevent cache stampede
+- **Three-Axis Cache Behaviour**: Independently configure miss-fill strategy (`MissFillPolicy`), hit-refresh strategy (`HitRefreshPolicy`), and error handling (`ErrorPolicy`)
+- **Background Refresh**: Automatically refresh cached data in the background to reduce data staleness; mutex prevents cache stampede
 - **Configurable TTL**: Set default and per-call TTL values
 - **Thread Safety**: Built-in per-key locking prevents race conditions
 - **JSON Serialization**: Automatic marshaling/unmarshaling of complex data types
@@ -50,17 +50,17 @@ The cache system's behavior can be best understood through its interaction flows
 1. **Cache Hit Flow**:
    - Initial key lookup in Redis
    - Check for staleness using lastRefreshByKey
-   - Optional background refresh through Light Green section
+   - Optional background refresh through Light Green section (governed by `HitRefreshPolicy`)
    - Immediate return of cached value
 
 2. **Cache Miss Flow**:
-   - Two possible policies when data is not found:
-     - SyncWriteThenReturn: Block until data is generated and stored
-     - ReturnThenAsyncWrite: Return generated data immediately, store asynchronously in Orchid section
+   - Two example fill policies when data is not found:
+     - `MissFillSync`: Block until data is generated and stored
+     - `MissFillAsync`: Return generated data immediately, store asynchronously in Orchid section
 
 3. **Background Operations**:
    - Light Green section: Background refresh for stale data
-   - Orchid section: Async write workers for ReturnThenAsyncWrite policy
+   - Orchid section: Async write workers for `MissFillAsync` policy
    - Lock management via KeyedMutex to prevent cache stampede
    - Cooldown checks to prevent excessive refreshes
 
@@ -104,7 +104,7 @@ sequenceDiagram
         H->>R: GET key
         R-->>H: Key not found
 
-        alt SyncWriteThenReturn Policy
+        alt SyncWriteThenReturn Policy (MissFillSync)
             H->>KM: TryLock key
             H->>G: Generate value
             G->>E: Fetch data
@@ -113,7 +113,7 @@ sequenceDiagram
             H->>R: SET key
             H->>KM: Release lock
             H-->>-C: Return Result<T><br/>(fromCache: false)
-        else ReturnThenAsyncWrite Policy
+        else ReturnThenAsyncWrite Policy (MissFillAsync)
             rect rgba(218, 112, 214, 0.25)
                 H->>KM: TryLock key
                 H->>G: Generate value
@@ -133,7 +133,7 @@ sequenceDiagram
 Key benefits of this architecture:
 - **Type Safety**: Generic `Handler<T>` ensures compile-time type checking
 - **Concurrency Control**: Per-key locking via `KeyedMutex` prevents cache stampede
-- **Flexible Policies**: Choose between immediate consistency (sync) or better latency (async)
+- **Three Independent Axes**: Combine `MissFillPolicy`, `HitRefreshPolicy`, and `ErrorPolicy` freely
 - **Background Refresh**: Keep cache fresh without blocking client requests
 - **Cooldown Management**: Prevent excessive updates with configurable refresh intervals
 
@@ -186,7 +186,7 @@ Configuration Levels:
                                 │ • defaultTTL        │
                                 │ • bgRefreshTimeout  │
                                 │ • refreshCooldown   │
-                                │ • defaultMissPolicy │
+                                │ • defaultMissFillPolicy │
                                 └─────────────────────┘
 
 ┌─────────────────────┐         ┌─────────────────────┐
@@ -195,7 +195,7 @@ Configuration Levels:
                                 ├─────────────────────┤
                                 │ • ttl: time.Duration│
                                 │ • disableHitRefresh │
-                                │ • overrideMissPolicy│
+                                │ • overrideMissFillPolicy│
                                 └─────────────────────┘
 ```
 
@@ -252,11 +252,17 @@ Client ──GetOrRefresh(key,gen)──▶ Handler ──Get(key)──▶ Redi
    └──Result{value, fromCache: false}─┘
 ```
 
-## 🔄 Cache Miss Policies
+## 🔄 Cache Behaviour Policies
 
-The library supports two distinct strategies for handling cache misses, each optimized for different use cases.
+Cache behaviour is controlled by **three independent axes** that can be combined freely:
 
-### Miss Policy Decision Flow
+| Axis | Type | Controls |
+|------|------|----------|
+| **Miss-fill** | `MissFillPolicy` | What happens when the key is not in the cache |
+| **Hit-refresh** | `HitRefreshPolicy` | Whether/how to proactively refresh a key that was found |
+| **Error handling** | `ErrorPolicy` | Whether generator errors surface to the caller |
+
+### Miss-Fill Policy Decision Flow
 
 ```
 GetOrRefresh Called
@@ -271,87 +277,82 @@ GetOrRefresh Called
     ▼       ▼
 [Cache Hit] [Cache Miss]
     │           │
-    │           ▼
-    │      Which Miss Policy?
-    │           │
-    │       ┌───┴───┐
-    │       │       │
-    │   Sync Policy Async Policy
-    │       │       │
-    │       ▼       ▼
-    │   ┌─────────────────┐   ┌─────────────────┐
-    │   │ Acquire per-key │   │ Generate data   │
-    │   │ lock            │   │ immediately     │
-    │   │      ▼          │   │      ▼          │
-    │   │ Double-check    │   │ Return value    │
-    │   │ cache           │   │      ▼          │
-    │   │      ▼          │   │ Spawn background│
-    │   │ Generate data   │   │ writer          │
-    │   │ synchronously   │   │      ▼          │
-    │   │      ▼          │   │ Try-lock and    │
-    │   │ Write to Redis  │   │ write to Redis  │
-    │   │      ▼          │   └─────────────────┘
-    │   │ Return value    │
-    │   └─────────────────┘
-    │
-    ▼
-Background refresh enabled?
-        │
-    ┌───┴───┐
-    │       │
-   Yes      No
-    │       │
-    ▼       ▼
-Should refresh? [Return cached value]
-    │
-┌───┴───┐
-│       │
-Yes     No
-│       │
-▼       ▼
-[Spawn background refresh] [Return cached value]
-│
-▼
-[Return cached value]
+    ▼           ▼
+HitRefreshPolicy   MissFillPolicy
+(see below)        │
+              ┌────┴──────────────────────┐
+              │                           │
+           MissFillSync            MissFillAsync
+        MissFillCooperative      MissFillStaleOrSync
+              │                    MissFillFailFast
+              ▼
+    ┌─────────────────┐
+    │ Acquire per-key │
+    │ lock            │
+    │      ▼          │
+    │ Double-check    │
+    │ cache           │
+    │      ▼          │
+    │ Generate data   │
+    │      ▼          │
+    │ Write to Redis  │
+    │      ▼          │
+    │ Return value    │
+    └─────────────────┘
 ```
 
-### Policy Comparison
+### Miss-Fill Policy Comparison
 
-| Aspect | SyncWriteThenReturn | ReturnThenAsyncWrite |
-|--------|-------------------|---------------------|
-| **Response Time** | Slower (waits for Redis write) | Faster (immediate return) |
-| **Consistency** | Strong (always writes before return) | Eventual (writes in background) |
-| **Cache Stampede** | Prevented (per-key locking) | Possible (multiple generators) |
-| **Error Handling** | Generator errors block response | Generator errors returned immediately |
-| **Resource Usage** | Lower (no extra goroutines) | Higher (background goroutines) |
-| **Best For** | Critical data consistency | High-performance APIs |
+| Policy | Response Time | Consistency | Stampede Protection | Best For |
+|--------|---------------|-------------|---------------------|----------|
+| `MissFillSync` *(default)* | Slower | Strong | Excellent (in-process lock) | Critical data consistency |
+| `MissFillAsync` | Fastest | Eventual | Poor (no lock before gen) | High-performance APIs |
+| `MissFillStaleOrSync` | Fast when stale exists | Eventual | Good | Content delivery, web apps |
+| `MissFillFailFast` | Fastest | N/A | N/A | Circuit-breaker / explicit fallback |
+| `MissFillCooperative` | Medium | Strong | Excellent (lock with timeout) | High concurrency, expensive generation |
+
+### Hit-Refresh Policy Comparison
+
+| Policy | Trigger | Best For |
+|--------|---------|----------|
+| `HitRefreshDefault` *(default)* | Every hit, gated by `refreshCooldown` | General use |
+| `HitRefreshAhead` | Remaining TTL drops below threshold | Predictable workloads, avoid cold misses |
+| `HitRefreshProbabilistic` | XFetch algorithm — probability rises with age | Distributed load distribution, large fleets |
+| `HitRefreshNone` | Never | Read-heavy, TTL expiry is acceptable |
+
+### Error Policy
+
+| Policy | Behaviour | Best For |
+|--------|-----------|----------|
+| `ErrorPolicySurface` *(default)* | Generator error returned to caller | Most cases |
+| `ErrorPolicyZeroValue` | Error suppressed; caller receives zero value + nil error | Non-critical data, graceful degradation |
+
+> `ErrCacheMiss` (returned by `MissFillFailFast`) is **never** suppressed by `ErrorPolicyZeroValue` — it is an intentional signal, not a generation failure.
 
 ```
 ┌─────────────────────────────────┐   ┌─────────────────────────────────┐
-│        Sync Policy (Default)    │   │         Async Policy            │
+│       MissFillSync              │   │        MissFillAsync            │
 ├─────────────────────────────────┤   ├─────────────────────────────────┤
-│                                 │   │                                 │
-│  [Cache Miss] ──────────────────│   │──────────────── [Cache Miss]   │
-│      │                          │   │                     │           │
-│      ▼                          │   │                     ▼           │
-│  [Acquire Lock]                 │   │              [Generate Data]    │
-│      │                          │   │                     │           │
-│      ▼                          │   │                     ▼           │
-│  [Double Check]                 │   │          [Return Data           │
-│      │                          │   │           Immediately] ◄────────│
-│      ▼                          │   │                     │           │
-│  [Generate Data]                │   │                     ▼           │
-│      │                          │   │            [Background:         │
-│      ▼                          │   │             Try Lock]           │
-│  [Write to Redis]               │   │                     │           │
-│      │                          │   │                     ▼           │
-│      ▼                          │   │            [Background:         │
-│  [Return Data] ◄────────────────│   │             Check & Write]      │
-│                                 │   │                                 │
+│  [Cache Miss]                   │   │  [Cache Miss]                   │
+│      │                          │   │      │                          │
+│      ▼                          │   │      ▼                          │
+│  [Acquire Lock]                 │   │  [Generate Data]                │
+│      │                          │   │      │                          │
+│      ▼                          │   │      ▼                          │
+│  [Double Check]                 │   │  [Return Data immediately] ◄───│
+│      │                          │   │      │                          │
+│      ▼                          │   │      ▼                          │
+│  [Generate Data]                │   │  [Background: Try Lock]         │
+│      │                          │   │      │                          │
+│      ▼                          │   │      ▼                          │
+│  [Write to Redis]               │   │  [Background: Check & Write]    │
+│      │                          │   │                                 │
+│      ▼                          │   │                                 │
+│  [Return Data] ◄────────────────│   │                                 │
 └─────────────────────────────────┘   └─────────────────────────────────┘
      Slower response time                    Faster response time
      Strong consistency                      Eventual consistency
-     Prevents cache stampede                May allow cache stampede
+     Prevents cache stampede                 May allow cache stampede
 ```
 
 ## 🔒 Concurrency & Locking
@@ -688,7 +689,7 @@ func main() {
         cache.WithPrefix("users"),
         cache.WithDefaultTTL(10*time.Minute),
         cache.WithBackgroundRefreshTimeout(5*time.Second),
-        cache.WithMissPolicy(cache.MissPolicySyncWriteThenReturn),
+        cache.WithMissFillPolicy(cache.MissFillSync),
     )
 
     ctx := context.Background()
@@ -714,22 +715,71 @@ func main() {
 }
 ```
 
-### Cache Miss Policies
+### Cache Miss-Fill Policies
 
-#### Sync Write-Then-Return (Default)
+#### Sync Fill (Default)
 ```go
-// On cache miss: generate data, write to cache, then return
+// On cache miss: acquire lock, double-check, generate, write, return
 result, err := handler.GetOrRefresh(ctx, "key", generator,
-    cache.WithCallMissPolicy(cache.MissPolicySyncWriteThenReturn),
+    cache.WithCallMissFillPolicy(cache.MissFillSync),
 )
 ```
 
-#### Async Return-Then-Write
+#### Async Fill
 ```go
 // On cache miss: generate and return immediately, write to cache in background
 result, err := handler.GetOrRefresh(ctx, "key", generator,
-    cache.WithCallMissPolicy(cache.MissPolicyReturnThenAsyncWrite),
+    cache.WithCallMissFillPolicy(cache.MissFillAsync),
 )
+```
+
+#### Stale-While-Revalidate Fill
+```go
+// On cache miss: return stale data if available, refresh in background;
+// requires WithStaleDataTTL on the handler
+handler := cache.New[string](rdb,
+    cache.WithStaleDataTTL(24*time.Hour),
+)
+result, err := handler.GetOrRefresh(ctx, "key", generator,
+    cache.WithCallMissFillPolicy(cache.MissFillStaleOrSync),
+)
+```
+
+#### Fail-Fast
+```go
+// On cache miss: return ErrCacheMiss immediately, no generation
+result, err := handler.GetOrRefresh(ctx, "key", generator,
+    cache.WithCallMissFillPolicy(cache.MissFillFailFast),
+)
+if errors.Is(err, cache.ErrCacheMiss) {
+    // handle explicitly
+}
+```
+
+### Hit-Refresh Policies
+
+```go
+// Refresh-ahead: trigger background refresh when TTL drops below threshold
+handler := cache.New[string](rdb,
+    cache.WithDefaultHitRefreshPolicy(cache.HitRefreshAhead),
+    cache.WithRefreshAheadThreshold(0.2), // refresh when 20% TTL remains
+)
+
+// Probabilistic: XFetch — probability of refresh grows as entry ages
+handler := cache.New[string](rdb,
+    cache.WithDefaultHitRefreshPolicy(cache.HitRefreshProbabilistic),
+    cache.WithProbabilisticBeta(1.0),
+)
+```
+
+### Error Policy
+
+```go
+// Suppress generator errors — return zero value + nil error instead
+result, err := handler.GetOrRefresh(ctx, "key", generator,
+    cache.WithCallErrorPolicy(cache.ErrorPolicyZeroValue),
+)
+// err is nil even if generator failed; result.Value is the zero value
 ```
 
 ### Configuration Options
@@ -737,20 +787,24 @@ result, err := handler.GetOrRefresh(ctx, "key", generator,
 #### Handler-Level Options
 ```go
 handler := cache.New[string](rdb,
-    cache.WithPrefix("myapp"),                           // Key prefix
-    cache.WithDefaultTTL(5*time.Minute),                // Default expiration
-    cache.WithBackgroundRefreshTimeout(3*time.Second),   // Background refresh timeout
-    cache.WithRefreshCooldown(1*time.Minute),           // Min time between refreshes
-    cache.WithMissPolicy(cache.MissPolicySyncWriteThenReturn), // Default miss policy
+    cache.WithPrefix("myapp"),                             // Key prefix
+    cache.WithDefaultTTL(5*time.Minute),                  // Default expiration
+    cache.WithBackgroundRefreshTimeout(3*time.Second),    // Background refresh timeout
+    cache.WithRefreshCooldown(1*time.Minute),             // Min time between refreshes
+    cache.WithMissFillPolicy(cache.MissFillSync),         // Default miss-fill policy
+    cache.WithDefaultHitRefreshPolicy(cache.HitRefreshDefault), // Default hit-refresh policy
+    cache.WithDefaultErrorPolicy(cache.ErrorPolicySurface),     // Default error policy
 )
 ```
 
 #### Call-Level Options
 ```go
 result, err := handler.GetOrRefresh(ctx, "key", generator,
-    cache.WithTTL(30*time.Minute),                      // Override TTL for this call
-    cache.WithoutBackgroundRefresh(),                   // Disable background refresh
-    cache.WithCallMissPolicy(cache.MissPolicyReturnThenAsyncWrite), // Override miss policy
+    cache.WithTTL(30*time.Minute),                        // Override TTL for this call
+    cache.WithoutBackgroundRefresh(),                     // Disable background refresh
+    cache.WithCallMissFillPolicy(cache.MissFillAsync),    // Override miss-fill policy
+    cache.WithCallHitRefreshPolicy(cache.HitRefreshAhead),// Override hit-refresh policy
+    cache.WithCallErrorPolicy(cache.ErrorPolicyZeroValue),// Override error policy
 )
 ```
 
@@ -768,10 +822,19 @@ result, err := handler.GetOrRefresh(ctx, "key", generator,
 |                    | `WithDefaultTTL(ttl time.Duration) Option` |
 |                    | `WithBackgroundRefreshTimeout(d time.Duration) Option` |
 |                    | `WithRefreshCooldown(d time.Duration) Option` |
-|                    | `WithMissPolicy(p MissPolicy) Option` |
+|                    | `WithMissFillPolicy(p MissFillPolicy) Option` |
+|                    | `WithDefaultHitRefreshPolicy(p HitRefreshPolicy) Option` |
+|                    | `WithDefaultErrorPolicy(p ErrorPolicy) Option` |
+|                    | `WithStaleDataTTL(ttl time.Duration) Option` |
+|                    | `WithRefreshAheadThreshold(threshold float64) Option` |
+|                    | `WithProbabilisticBeta(beta float64) Option` |
+|                    | `WithCooperativeTimeout(timeout time.Duration) Option` |
 | **Call Options** | `WithTTL(ttl time.Duration) CallOption` |
 |                 | `WithoutBackgroundRefresh() CallOption` |
-|                 | `WithCallMissPolicy(p MissPolicy) CallOption` |
+|                 | `WithCallMissFillPolicy(p MissFillPolicy) CallOption` |
+|                 | `WithCallHitRefreshPolicy(p HitRefreshPolicy) CallOption` |
+|                 | `WithCallErrorPolicy(p ErrorPolicy) CallOption` |
+|                 | `WithStaleCheckTimeout(timeout time.Duration) CallOption` |
 
 ### Method Flow Diagrams
 
@@ -856,13 +919,17 @@ Handler Creation ─────────────▶ handlerConfig (Globa
                                       ├─ defaultTTL: time.Duration
                                       ├─ bgRefreshTimeout: time.Duration
                                       ├─ refreshCooldown: time.Duration
-                                      └─ defaultMissPolicy: MissPolicy
+                                      ├─ defaultMissFillPolicy: MissFillPolicy
+                                      ├─ defaultHitRefreshPolicy: HitRefreshPolicy
+                                      └─ defaultErrorPolicy: ErrorPolicy
 
 Method Call ──────────────────▶ callOpts (Call-specific Overrides)
                                       │
                                       ├─ ttl: time.Duration
                                       ├─ disableHitRefresh: bool
-                                      └─ overrideMissPolicy: *MissPolicy
+                                      ├─ overrideMissFillPolicy: *MissFillPolicy
+                                      ├─ overrideHitRefreshPolicy: *HitRefreshPolicy
+                                      └─ overrideErrorPolicy: *ErrorPolicy
 
 Configuration Priority:
 ┌─────────────────────────────────────────────────────────────┐
@@ -882,7 +949,8 @@ Configuration Priority:
 | **defaultTTL** | 1-5 minutes | 10-30 minutes | 1-2 minutes |
 | **bgRefreshTimeout** | 1-2 seconds | 5-10 seconds | 3-5 seconds |
 | **refreshCooldown** | 10-30 seconds | 1-5 minutes | 30-60 seconds |
-| **defaultMissPolicy** | ReturnThenAsyncWrite | SyncWriteThenReturn | SyncWriteThenReturn |
+| **MissFillPolicy** | `MissFillAsync` | `MissFillSync` | `MissFillSync` |
+| **HitRefreshPolicy** | `HitRefreshDefault` | `HitRefreshAhead` | `HitRefreshNone` |
 
 ```
 Performance Goals
@@ -1158,13 +1226,13 @@ This section lists other open source caching libraries and their approach to cac
 | Feature | This Package | Other Go Libraries | Notes |
 |---------|-------------|-------------------|-------|
 | **Generic Type Safety** | ✅ Full generics support | ❌ Most use interface{} | Compile-time type safety |
-| **Advanced Miss Policies** | ✅ 8 different policies | ❌ Usually 1-2 basic patterns | Industry-leading policy variety |
-| **Stale-While-Revalidate** | ✅ Built-in SWR support | ❌ Rare in Go libraries | Common in web caching |
-| **Probabilistic Refresh** | ✅ Configurable beta parameter | ❌ Not commonly implemented | Load distribution |
-| **Refresh-Ahead** | ✅ TTL-based proactive refresh | ❌ Limited implementations | Prevents cache misses |
-| **Cooperative Refresh** | ✅ Anti-stampede with timeout | ⚠️ Basic locking only | Advanced concurrency control |
+| **Three-Axis Policy Design** | ✅ Miss-fill, hit-refresh, error handling are independent | ❌ Usually a single flat policy enum | Compose behaviours freely |
+| **Stale-While-Revalidate** | ✅ `MissFillStaleOrSync` | ❌ Rare in Go libraries | Common in web caching |
+| **Probabilistic Refresh** | ✅ `HitRefreshProbabilistic` (XFetch) | ❌ Not commonly implemented | Load distribution |
+| **Refresh-Ahead** | ✅ `HitRefreshAhead`, TTL-threshold based | ❌ Limited implementations | Prevents cold misses |
+| **Cooperative Refresh** | ✅ `MissFillCooperative` (lock + timeout fallback) | ⚠️ Basic locking only | Advanced concurrency control |
 | **Per-Key Locking** | ✅ Fine-grained mutex system | ⚠️ Often global locks | Reduces contention |
-| **Comprehensive Config** | ✅ Handler + call-level options | ❌ Usually basic config | Maximum flexibility |
+| **Graceful Degradation** | ✅ `ErrorPolicyZeroValue` call option | ❌ Usually hard-coded | Composable, not pre-baked |
 
 ### Inspiration and Research Sources
 

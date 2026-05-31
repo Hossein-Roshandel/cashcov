@@ -159,7 +159,7 @@ func TestHandler(t *testing.T) {
 	// 		return expectedValue, nil
 	// 	}
 
-	// 	result, err = h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicySyncWriteThenReturn))
+	// 	result, err = h.GetOrRefresh(ctx, key, gen, WithCallMissFillPolicy(cache.MissFillSync))
 	// 	if err != nil {
 	// 		t.Fatalf("GetOrRefresh failed: %v", err)
 	// 	}
@@ -197,7 +197,7 @@ func TestHandler(t *testing.T) {
 	// 		return expectedValue, nil
 	// 	}
 
-	// 	result, err = h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicyReturnThenAsyncWrite))
+	// 	result, err = h.GetOrRefresh(ctx, key, gen, WithCallMissFillPolicy(cache.MissFillAsync))
 	// 	if err != nil {
 	// 		t.Fatalf("GetOrRefresh failed: %v", err)
 	// 	}
@@ -389,7 +389,7 @@ func TestHandler(t *testing.T) {
 	// 	for i := 0; i < concurrentCalls; i++ {
 	// 		go func() {
 	// 			defer wg.Done()
-	// 			_, err = h.GetOrRefresh(ctx, key, gen, WithMissPolicy(MissPolicySyncWriteThenReturn))
+	// 			_, err = h.GetOrRefresh(ctx, key, gen, WithCallMissFillPolicy(cache.MissFillSync))
 	// 			if err != nil {
 	// 				t.Errorf("GetOrRefresh failed: %v", err)
 	// 			}

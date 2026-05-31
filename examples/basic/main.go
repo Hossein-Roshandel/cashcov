@@ -53,7 +53,7 @@ func main() {
 		cache.WithPrefix("myapp"),                                     // Prefix for Redis keys
 		cache.WithDefaultTTL(TTLminutes*time.Minute),                  // TTL for cache entries
 		cache.WithRefreshCooldown(RefreshCoolDownSeconds*time.Second), // Cooldown for refresh
-		cache.WithMissPolicy(cache.MissPolicyReturnThenAsyncWrite),    // Policy for cache misses
+		cache.WithMissFillPolicy(cache.MissFillAsync),                 // Fill cache in background after miss
 	)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create cache handler: %v", err))
